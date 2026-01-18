@@ -40,6 +40,9 @@ class FFmpegTask(BaseTask):
         # Resolve fps/framerate (fps takes precedence)
         framerate = self.args.get("fps") or self.args.get("framerate", 24)
 
+        width = self.args.get("width")
+        height = self.args.get("height")
+
         # Support container override
         container = self.args.get("container")
         if container:
@@ -139,6 +142,24 @@ class FFmpegTask(BaseTask):
             # Common default for x264 compatibility
             if codec == "libx264" and not any("-pix_fmt" in arg for arg in extra_args):
                 cmd.extend(["-pix_fmt", "yuv420p"])
+
+        # Add scaling / letterboxing filters
+        if width or height:
+            if width and height:
+                # Fit within width x height and pad to canvas (letterbox)
+                # force_original_aspect_ratio=decrease fits the image inside
+                scale_filter = (
+                    f"scale=w={width}:h={height}:force_original_aspect_ratio=decrease,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+                )
+            elif width:
+                # Fixed width, preserve aspect (use -2 to ensure height is even for YUV420)
+                scale_filter = f"scale={width}:-2"
+            else:
+                # Fixed height, preserve aspect (use -2 to ensure width is even for YUV420)
+                scale_filter = f"scale=-2:{height}"
+
+            cmd.extend(["-vf", scale_filter])
 
         # Add extra user arguments
         if extra_args:

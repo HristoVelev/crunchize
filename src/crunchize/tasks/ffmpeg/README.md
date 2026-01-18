@@ -9,6 +9,8 @@ The `ffmpeg` task provides high-level control over video encoding, supporting bo
 | `output_path`   | String        | Yes      | -          | Path to the resulting video file.                                           |
 | `input_path`    | String        | No*      | -          | FFmpeg-style input pattern (e.g., `shot.%04d.exr`).                         |
 | `input_files`   | List[String]  | No*      | -          | Explicit list of file paths to concatenate into a video.                    |
+| `width`         | Integer       | No       | -          | Target width in pixels.                                                     |
+| `height`        | Integer       | No       | -          | Target height in pixels.                                                    |
 | `fps`           | Integer/Float | No       | 24         | Frames per second for the output video. (Alias: `framerate`)                |
 | `codec`         | String        | No       | `libx264`  | Video codec to use (e.g., `libx264`, `prores_ks`, `dnxhd`).                 |
 | `container`     | String        | No       | -          | Optional extension override (e.g., `mov`, `mp4`, `mkv`).                    |
@@ -17,6 +19,14 @@ The `ffmpeg` task provides high-level control over video encoding, supporting bo
 | `start_frame`   | Integer       | No       | -          | The starting frame number for pattern-based inputs.                         |
 
 > **Note**: One of `input_path` or `input_files` must be provided. If `input_files` is used, the task automatically generates a temporary concat list for FFmpeg.
+
+## Features
+
+- **Flexible Resizing**: Supports pixel-based dimensions (`width`, `height`).
+- **Smart Fitting**:
+  - Providing both `width` and `height` fits the image within the dimensions and applies black bars (letterboxing).
+  - Providing only one preserves the aspect ratio (automatically ensuring even dimensions for codec compatibility).
+- **Directory Creation**: Automatically creates the parent directory for the `output_path` if it does not exist.
 
 ## Popular VFX Codecs
 
