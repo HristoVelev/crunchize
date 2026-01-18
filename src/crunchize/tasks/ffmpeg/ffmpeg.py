@@ -23,6 +23,12 @@ class FFmpegTask(BaseTask):
         if "input_path" not in self.args and "input_files" not in self.args:
             raise ValueError("FFmpegTask requires 'input_path' or 'input_files'.")
 
+        existing = self.args.get("existing", "replace")
+        if existing not in ["skip", "replace"]:
+            raise ValueError(
+                f"Invalid value for 'existing': {existing}. Must be 'skip' or 'replace'."
+            )
+
     def run(self) -> str:
         """
         Execute ffmpeg command.
@@ -30,10 +36,26 @@ class FFmpegTask(BaseTask):
         input_path = self.args.get("input_path")
         input_files = self.args.get("input_files")
         output_path = self.args["output_path"]
-        framerate = self.args.get("framerate", 24)
+
+        # Resolve fps/framerate (fps takes precedence)
+        framerate = self.args.get("fps") or self.args.get("framerate", 24)
+
+        # Support container override
+        container = self.args.get("container")
+        if container:
+            container = container.lstrip(".")
+            base, _ = os.path.splitext(output_path)
+            output_path = f"{base}.{container}"
+            self.logger.debug(f"Adjusted output path with container: {output_path}")
+
+        # Check if output already exists
+        existing = self.args.get("existing", "replace")
+        if existing == "skip" and os.path.exists(output_path):
+            self.logger.info(f"Skipping video creation: {output_path} already exists.")
+            return output_path
+
         start_frame = self.args.get("start_frame")
         extra_args = self.args.get("extra_args", [])
-        overwrite = self.args.get("overwrite", True)
 
         # Ensure output directory exists
         output_dir = os.path.dirname(output_path)
@@ -49,7 +71,7 @@ class FFmpegTask(BaseTask):
 
         cmd = ["ffmpeg"]
 
-        if overwrite:
+        if existing == "replace":
             cmd.append("-y")
 
         # Input handling
@@ -74,7 +96,18 @@ class FFmpegTask(BaseTask):
 
             self.logger.info(f"Created concat list: {list_file_path}")
 
-            cmd.extend(["-f", "concat", "-safe", "0", "-i", list_file_path])
+            cmd.extend(
+                [
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-r",
+                    str(framerate),
+                    "-i",
+                    list_file_path,
+                ]
+            )
 
             # Concat doesn't handle framerate on input easily for image sequences the same way pattern does
             # often need -r before input or filters.
@@ -91,12 +124,21 @@ class FFmpegTask(BaseTask):
             cmd.extend(["-i", input_path])
 
         # Output options
-        # Ensure we use libx264 by default if mp4 and no codec specified?
-        # Let's just respect extra_args or defaults
-        if not any("-c:v" in arg for arg in extra_args) and not any(
-            "-vcodec" in arg for arg in extra_args
+        codec = self.args.get("codec")
+
+        # Ensure we use libx264 by default if no codec specified
+        if (
+            not codec
+            and not any("-c:v" in arg for arg in extra_args)
+            and not any("-vcodec" in arg for arg in extra_args)
         ):
-            cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            codec = "libx264"
+
+        if codec:
+            cmd.extend(["-c:v", codec])
+            # Common default for x264 compatibility
+            if codec == "libx264" and not any("-pix_fmt" in arg for arg in extra_args):
+                cmd.extend(["-pix_fmt", "yuv420p"])
 
         # Add extra user arguments
         if extra_args:

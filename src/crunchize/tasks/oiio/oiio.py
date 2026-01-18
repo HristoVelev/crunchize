@@ -22,6 +22,12 @@ class OIIOToolTask(BaseTask):
         if "input_path" not in self.args and "item" not in self.args:
             raise ValueError("OIIOToolTask requires 'input_path' or implicit 'item'.")
 
+        existing = self.args.get("existing", "replace")
+        if existing not in ["skip", "replace"]:
+            raise ValueError(
+                f"Invalid value for 'existing': {existing}. Must be 'skip' or 'replace'."
+            )
+
     def run(self) -> str:
         """
         Execute oiiotool command.
@@ -29,6 +35,15 @@ class OIIOToolTask(BaseTask):
         # Resolve input path (explicit > implicit)
         input_path = self.args.get("input_path") or self.args.get("item")
         output_path = self.args["output_path"]
+
+        # Check if output already exists
+        existing = self.args.get("existing", "replace")
+        if existing == "skip" and os.path.exists(output_path):
+            self.logger.info(f"Skipping processing: {output_path} already exists.")
+            return output_path
+
+        width = self.args.get("width")
+        height = self.args.get("height")
         scale = self.args.get("scale")
         extra_args = self.args.get("extra_args", [])
 
@@ -46,6 +61,17 @@ class OIIOToolTask(BaseTask):
 
         # Build command: oiiotool input [ops] -o output
         cmd = ["oiiotool", input_path]
+
+        # Apply fixed dimensions if requested
+        if width and height:
+            # Fit within width x height and pad to canvas size (letterbox)
+            cmd.extend(["--fit", f"{width}x{height}", "--canvas", f"{width}x{height}"])
+        elif width:
+            # Preserve aspect ratio based on width
+            cmd.extend(["--resize", f"{width}x0"])
+        elif height:
+            # Preserve aspect ratio based on height
+            cmd.extend(["--resize", f"0x{height}"])
 
         # Apply scaling if requested
         if scale:

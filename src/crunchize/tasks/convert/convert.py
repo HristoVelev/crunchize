@@ -27,6 +27,12 @@ class ConvertTask(BaseTask):
                 f"Missing required arguments for ConvertTask: {', '.join(missing)}"
             )
 
+        existing = self.args.get("existing", "replace")
+        if existing not in ["skip", "replace"]:
+            raise ValueError(
+                f"Invalid value for 'existing': {existing}. Must be 'skip' or 'replace'."
+            )
+
         # Basic check for config file existence
         config_path = self.args["config_path"]
         if not os.path.exists(config_path) and not self.dry_run:
@@ -50,6 +56,12 @@ class ConvertTask(BaseTask):
             if ext.lower() != f".{output_format}".lower():
                 output_path = f"{base}.{output_format}"
                 self.logger.debug(f"Adjusted output path extension to: {output_path}")
+
+        # Check if output already exists
+        existing = self.args.get("existing", "replace")
+        if existing == "skip" and os.path.exists(output_path):
+            self.logger.info(f"Skipping conversion: {output_path} already exists.")
+            return output_path
 
         # Ensure output directory exists
         output_dir = os.path.dirname(output_path)

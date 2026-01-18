@@ -1,3 +1,9 @@
+---
+config:
+  # every_nth: 1
+  # wipe_log: false
+  file_amount: 1.0
+
 vars:
   # Input Configuration
   root_dir: "/mnt/prod/projects/dra/global/input/2026-01-07--001/PLATES"
@@ -7,7 +13,7 @@ vars:
   work_dir: "/tmp/crunchize_work"
   # OCIO Configuration (Adjust paths as needed for your environment)
   ocio_config: "/mnt/prod/bin/aces/studio-config-v4.0.0_aces-v2.0_ocio-v2.5.ocio"
-  input_space: "ACES - ACEScg"
+  input_space: "ACES2065-1"
   output_space: "Rec.1886 Rec.709 - Display"
 
 tasks:
@@ -18,7 +24,7 @@ tasks:
       pattern: "{{ input_pattern }}"
 
   # 2. Prepare paths for conversion (Map Input Root -> Work Dir)
-  - name: "Map Convert Paths"
+  - name: "exr to jpg paths"
     type: "pathmap"
     input: "Find Source Plates"
     args:
@@ -27,9 +33,9 @@ tasks:
       output_key: "convert_dest"
 
   # 3. Convert to JPG (OCIO)
-  - name: "Color Convert"
+  - name: "exr to jpg convert"
     type: "convert"
-    input: "Map Convert Paths"
+    input: "exr to jpg paths"
     # Registers the list of generated JPG paths
     register: "jpg_files"
     args:
@@ -41,18 +47,18 @@ tasks:
       output_space: "{{ output_space }}"
 
   # 4. Prepare paths for scaling (Map /converted/ -> /scaled/)
-  - name: "Map Scale Paths"
+  - name: "scale paths"
     type: "pathmap"
-    input: "Color Convert" # Input is the list of JPGs from previous task
+    input: "exr to jpg convert" # Input is the list of JPGs from previous task
     args:
-      search: "PLATES"
+      search: "test-proxy"
       replace: "test-scaled"
       output_key: "scale_dest"
 
   # 5. Scale Images (OIIO)
   - name: "Scale to 50%"
     type: "oiio"
-    input: "Map Scale Paths"
+    input: "scale paths"
     # Registers the list of scaled JPG paths
     register: "scaled_files"
     args:
@@ -61,28 +67,53 @@ tasks:
       scale: 0.5
 
   # 6. Prepare Video Paths (Group sequences and map to output)
-  - name: "Map Video Paths"
+  - name: "Video paths"
     type: "pathmap"
     batch: true
     input: "Scale to 50%"
     args:
       reduce: true
-      search: "PLATES"
+      search: "test-scaled"
       replace: "test-video"
       output_key: "video_base"
 
   # 7. Create Video (FFmpeg)
-  - name: "Generate Daily"
+  - name: "video create"
     type: "ffmpeg"
-    input: "Map Video Paths"
+    input: "Video paths"
     args:
       input_files: "{{ item.files }}"
-      output_path: "{{ item.video_base }}.mp4"
-      framerate: 24
+      output_path: "{{ item.video_base }}"
+      fps: 24
+      container: "mp4"
+      # Popular VFX codecs: libx264 (H.264), prores_ks (ProRes), dnxhd (DNxHR), libvpx-vp9 (VP9)
+      codec: "libx264"
       overwrite: true
       extra_args: ["-crf", "23", "-preset", "fast"]
 
-  # # 8. Cleanup Intermediate Files
+  # 8. Prepare Thumbnail Paths (Map PLATES -> test-thumbs)
+  - name: "Thumbnail paths"
+    type: "pathmap"
+    batch: true
+    input: "Find Source Plates"
+    args:
+      reduce: true
+      search: "PLATES"
+      replace: "test-thumbs"
+      output_key: "thumb_base"
+
+  # 9. Generate Sequence Thumbnail
+  - name: "sequence thumbnail"
+    type: "thumbnail"
+    input: "Thumbnail paths"
+    args:
+      input_files: "{{ item.files }}"
+      output_path: "{{ item.thumb_base }}"
+      sourcelocation: 0.5
+      size: 480
+      format: "jpg"
+
+  # # 9. Cleanup Intermediate Files
   # - name: "Cleanup Converted"
   #   type: "delete"
   #   input: "Color Convert" # Deletes the intermediate full-res JPGs
