@@ -1,0 +1,25 @@
+vars:
+  shot: "TS_001"
+  # Define a range of frames or a specific list
+  frames: ["1001", "1002", "1003", "1004"]
+
+  # Paths
+  root_dir: "/tmp/crunchize_demo"
+  # Note: You need a valid OCIO config for this to actually run
+  ocio_config: "/path/to/config.ocio"
+
+  # Colorspaces
+  src_space: "ACES - ACEScg"
+  dst_space: "Output - sRGB"
+
+tasks:
+  - name: "Convert EXR to sRGB Proxy"
+    type: "ocio"
+    loop: "{{ frames }}"
+    args:
+      # {{ item }} is the current value from the loop list
+      input_path: "{{ root_dir }}/shots/{{ shot }}/exr/{{ shot }}_{{ item }}.exr"
+      output_path: "{{ root_dir }}/shots/{{ shot }}/proxy/{{ shot }}_{{ item }}.jpg"
+      config_path: "{{ ocio_config }}"
+      input_space: "{{ src_space }}"
+      output_space: "{{ dst_space }}"
