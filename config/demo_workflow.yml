@@ -1,0 +1,92 @@
+vars:
+  # Input Configuration
+  root_dir: "/mnt/prod/projects/dra/global/input/2026-01-07--001/PLATES"
+  input_pattern: "{{ root_dir }}/test*/*.exr"
+
+  # Output/Work Configuration
+  work_dir: "/tmp/crunchize_work"
+  # OCIO Configuration (Adjust paths as needed for your environment)
+  ocio_config: "/mnt/prod/bin/aces/studio-config-v4.0.0_aces-v2.0_ocio-v2.5.ocio"
+  input_space: "ACES - ACEScg"
+  output_space: "Rec.1886 Rec.709 - Display"
+
+tasks:
+  # 1. Gather Input Files
+  - name: "Find Source Plates"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  # 2. Prepare paths for conversion (Map Input Root -> Work Dir)
+  - name: "Map Convert Paths"
+    type: "pathmap"
+    input: "Find Source Plates"
+    args:
+      search: "PLATES"
+      replace: "test-proxy"
+      output_key: "convert_dest"
+
+  # 3. Convert to JPG (OCIO)
+  - name: "Color Convert"
+    type: "convert"
+    input: "Map Convert Paths"
+    # Registers the list of generated JPG paths
+    register: "jpg_files"
+    args:
+      input_path: "{{ item }}" # Original EXR from 'Find Source Plates'
+      output_path: "{{ convert_dest }}" # Mapped path
+      output_format: "jpg" # Force extension to .jpg
+      config_path: "{{ ocio_config }}"
+      input_space: "{{ input_space }}"
+      output_space: "{{ output_space }}"
+
+  # 4. Prepare paths for scaling (Map /converted/ -> /scaled/)
+  - name: "Map Scale Paths"
+    type: "pathmap"
+    input: "Color Convert" # Input is the list of JPGs from previous task
+    args:
+      search: "PLATES"
+      replace: "test-scaled"
+      output_key: "scale_dest"
+
+  # 5. Scale Images (OIIO)
+  - name: "Scale to 50%"
+    type: "oiio"
+    input: "Map Scale Paths"
+    # Registers the list of scaled JPG paths
+    register: "scaled_files"
+    args:
+      input_path: "{{ item }}" # Input is the converted JPG
+      output_path: "{{ scale_dest }}"
+      scale: 0.5
+
+  # 6. Prepare Video Paths (Group sequences and map to output)
+  - name: "Map Video Paths"
+    type: "pathmap"
+    batch: true
+    input: "Scale to 50%"
+    args:
+      reduce: true
+      search: "PLATES"
+      replace: "test-video"
+      output_key: "video_base"
+
+  # 7. Create Video (FFmpeg)
+  - name: "Generate Daily"
+    type: "ffmpeg"
+    input: "Map Video Paths"
+    args:
+      input_files: "{{ item.files }}"
+      output_path: "{{ item.video_base }}.mp4"
+      framerate: 24
+      overwrite: true
+      extra_args: ["-crf", "23", "-preset", "fast"]
+
+  # # 8. Cleanup Intermediate Files
+  # - name: "Cleanup Converted"
+  #   type: "delete"
+  #   input: "Color Convert" # Deletes the intermediate full-res JPGs
+
+  # - name: "Cleanup Scaled"
+  #   type: "delete"
+  #   input: "Scale to 50%" # Deletes the intermediate scaled JPGs

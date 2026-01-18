@@ -45,10 +45,16 @@ class CrunchizeEngine:
             except yaml.YAMLError as e:
                 raise ValueError(f"Error parsing YAML: {e}")
 
-    def _resolve_variable(self, value: Any, context: Dict[str, Any]) -> Any:
+    def _resolve_variable(
+        self, value: Any, context: Dict[str, Any], depth: int = 0
+    ) -> Any:
         """
         Recursively substitute {{ variable }} in strings, lists, and dicts.
         """
+        if depth > 10:
+            self.logger.warning(f"Max recursion depth reached resolving: {value}")
+            return value
+
         if isinstance(value, str):
             # Find all {{ var }} patterns
             pattern = r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}"
@@ -64,7 +70,7 @@ class CrunchizeEngine:
                     # If the entire string is just the variable, replace with the variable's value directly
                     # (preserves types like int, list, etc.)
                     if new_value.strip() == f"{{{{ {var_name} }}}}":
-                        return var_val
+                        return self._resolve_variable(var_val, context, depth + 1)
 
                     # Otherwise cast to string for text interpolation
                     new_value = new_value.replace(f"{{{{ {var_name} }}}}", str(var_val))
@@ -73,12 +79,18 @@ class CrunchizeEngine:
                     new_value = new_value.replace(f"{{{{{var_name}}}}}", str(var_val))
                 else:
                     self.logger.warning(f"Variable '{var_name}' not found in context.")
+
+            if new_value != value:
+                return self._resolve_variable(new_value, context, depth + 1)
+
             return new_value
 
         elif isinstance(value, list):
-            return [self._resolve_variable(item, context) for item in value]
+            return [self._resolve_variable(item, context, depth) for item in value]
         elif isinstance(value, dict):
-            return {k: self._resolve_variable(v, context) for k, v in value.items()}
+            return {
+                k: self._resolve_variable(v, context, depth) for k, v in value.items()
+            }
         else:
             return value
 
@@ -131,6 +143,7 @@ class CrunchizeEngine:
             loop_items = task_def.get("loop", None)
             input_ref = task_def.get("input", None)
             register_var = task_def.get("register")
+            batch_mode = task_def.get("batch", False)
 
             if not task_type:
                 self.logger.error(f"Skipping task '{name}': No type specified.")
@@ -165,43 +178,70 @@ class CrunchizeEngine:
             task_output = None
 
             if items_to_process and isinstance(items_to_process, list):
-                self.logger.info(
-                    f"Parallelizing task over {len(items_to_process)} items."
-                )
+                if batch_mode:
+                    self.logger.info(
+                        f"Running task in batch mode with {len(items_to_process)} items."
+                    )
+                    context = self.variables.copy()
+                    resolved_args = self._resolve_variable(task_args, context)
+                    resolved_args["items"] = items_to_process
 
-                futures = []
-                # Adjust max_workers as needed, or let it default to CPU count
-                with concurrent.futures.ProcessPoolExecutor() as executor:
-                    for item in items_to_process:
-                        # Create context for this iteration
-                        context = self.variables.copy()
-                        context["item"] = item
+                    self.logger.debug(f"Task '{name}' (Batch) Input: {resolved_args}")
 
-                        # If item is a dictionary, unpack it into context
-                        if isinstance(item, dict):
-                            context.update(item)
-
-                        # Resolve arguments with the item context
-                        resolved_args = self._resolve_variable(task_args, context)
-
-                        # Inject 'item' into args so tasks can access it directly
-                        if (
-                            isinstance(resolved_args, dict)
-                            and "item" not in resolved_args
-                        ):
-                            resolved_args["item"] = item
-
-                        futures.append(
-                            executor.submit(
-                                run_task_wrapper, task_cls, resolved_args, self.dry_run
-                            )
+                    try:
+                        task_output = run_task_wrapper(
+                            task_cls, resolved_args, self.dry_run
                         )
+                        self.logger.debug(
+                            f"Task '{name}' (Batch) Output: {task_output}"
+                        )
+                    except Exception as e:
+                        self.logger.error(f"Batch task execution failed: {e}")
+
+                else:
+                    self.logger.info(
+                        f"Parallelizing task over {len(items_to_process)} items."
+                    )
+
+                    futures = []
+                    # Adjust max_workers as needed, or let it default to CPU count
+                    with concurrent.futures.ProcessPoolExecutor() as executor:
+                        for item in items_to_process:
+                            # Create context for this iteration
+                            context = self.variables.copy()
+                            context["item"] = item
+
+                            # If item is a dictionary, unpack it into context
+                            if isinstance(item, dict):
+                                context.update(item)
+
+                            # Resolve arguments with the item context
+                            resolved_args = self._resolve_variable(task_args, context)
+
+                            # Inject 'item' into args so tasks can access it directly
+                            if (
+                                isinstance(resolved_args, dict)
+                                and "item" not in resolved_args
+                            ):
+                                resolved_args["item"] = item
+
+                            futures.append(
+                                executor.submit(
+                                    run_task_wrapper,
+                                    task_cls,
+                                    resolved_args,
+                                    self.dry_run,
+                                )
+                            )
 
                     # Wait for all to complete and collect results
                     loop_results = []
                     for future in futures:
                         try:
                             res = future.result()
+                            self.logger.debug(
+                                f"Task '{name}' (Parallel Item) Output: {res}"
+                            )
                             loop_results.append(res)
                         except Exception as e:
                             self.logger.error(f"Parallel task execution failed: {e}")
@@ -228,10 +268,13 @@ class CrunchizeEngine:
                 ):
                     resolved_args["item"] = items_to_process
 
+                self.logger.debug(f"Task '{name}' Input: {resolved_args}")
+
                 try:
                     task_output = run_task_wrapper(
                         task_cls, resolved_args, self.dry_run
                     )
+                    self.logger.debug(f"Task '{name}' Output: {task_output}")
                 except Exception as e:
                     self.logger.error(f"Task execution failed: {e}")
 
