@@ -1,0 +1,42 @@
+# Job Configuration for EXR Proxy Generation
+
+input:
+  # Pattern can be a sequence with hashes (####), a specific file, or a wildcard
+  pattern: "/mnt/prod/projects/dra/global/input/2026-01-07--001/PLATES/*/*.exr"
+
+ocio:
+  # Path to the OCIO configuration file
+  config_path: "/mnt/prod/bin/aces/studio-config-v4.0.0_aces-v2.0_ocio-v2.5.ocio"
+
+  # Input color space of the EXR files
+  input_space: "ACES2065-1"
+
+  # Target color space for the proxy (e.g., sRGB - Display)
+  output_space: "sRGB - Display"
+
+proxy:
+  # Scale factor (0.5 = 50% resolution)
+  scale: 0.5
+
+  # Number of threads for parallel processing (default: 8)
+  threads: 8
+
+  # Optional: Output directory. If commented out, proxies are saved next to inputs.
+  # output_dir: "/path/to/proxies"
+
+path_mapping:
+  # Replace a specific token in the path to reroot the output while keeping structure
+  input_anchor: "/PLATES/"
+  output_anchor: "/PLATES_PROXY/"
+  extension: ".jpg"
+
+mp4:
+  enabled: true
+  path_mapping:
+    # Maps the JPG proxy path (output of previous step) to MP4 path
+    input_anchor: "/PLATES_PROXY/"
+    output_anchor: "/DAILIES/"
+    extension: ".mp4"
+
+logging:
+  log_file: "~/plates.log"

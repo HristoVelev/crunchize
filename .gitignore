@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+# Don't track the actual media or large configs
+projects/
+*.exr
+*.jpg
+*.mp4
