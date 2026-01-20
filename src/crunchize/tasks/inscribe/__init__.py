@@ -1,0 +1,1 @@
+from .inscribe import InscribeTask

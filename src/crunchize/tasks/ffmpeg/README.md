@@ -1,64 +1,67 @@
 # FFmpeg Task
 
-The `ffmpeg` task provides high-level control over video encoding, supporting both single image sequence patterns and explicit file lists via the concat demuxer.
+The `ffmpeg` task encodes image sequences into video files. It is designed to work seamlessly with Crunchy's simplified data model and sequence grouping logic.
+
+## Implicit Data Flow
+
+The `ffmpeg` task is optimized for use after a `pathmap` task with `reduce: true`. 
+
+1.  **Implicit Input**: If the preceding task returns a sequence object (containing a `files` list), this task automatically uses those files as the source.
+2.  **Implicit Output**: If the input item contains a `base_path`, it is used as the default output path (appending the specified container extension).
+3.  **Automatic Concat**: When provided with a list of files, the task automatically generates a temporary FFmpeg concat file to ensure perfect frame order and timing.
 
 ## Parameters
 
-| Name            | Type          | Required | Default    | Description                                                                 |
-|-----------------|---------------|----------|------------|-----------------------------------------------------------------------------|
-| `output_path`   | String        | Yes      | -          | Path to the resulting video file.                                           |
-| `input_path`    | String        | No*      | -          | FFmpeg-style input pattern (e.g., `shot.%04d.exr`).                         |
-| `input_files`   | List[String]  | No*      | -          | Explicit list of file paths to concatenate into a video.                    |
-| `width`         | Integer       | No       | -          | Target width in pixels.                                                     |
-| `height`        | Integer       | No       | -          | Target height in pixels.                                                    |
-| `fps`           | Integer/Float | No       | 24         | Frames per second for the output video. (Alias: `framerate`)                |
-| `codec`         | String        | No       | `libx264`  | Video codec to use (e.g., `libx264`, `prores_ks`, `dnxhd`).                 |
-| `container`     | String        | No       | -          | Optional extension override (e.g., `mov`, `mp4`, `mkv`).                    |
-| `existing`      | String        | No       | `replace`  | How to handle existing files: `skip` (save time) or `replace`.              |
-| `extra_args`    | List/String   | No       | `[]`       | Additional raw FFmpeg command line arguments (e.g., `["-crf", "18"]`).       |
-| `start_frame`   | Integer       | No       | -          | The starting frame number for pattern-based inputs.                         |
+| Name | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `output_path` | String | No* | - | Target video path. Inferred from `base_path` if not provided. |
+| `fps` | Integer | No | `24` | Frames per second. |
+| `container` | String | No | `mp4` | Video container format (e.g., `mp4`, `mov`, `mkv`). |
+| `codec` | String | No | `libx264` | Video codec. |
+| `width` | Integer | No | - | Force output width (scales proportionally if height is missing). |
+| `height` | Integer | No | - | Force output height. |
+| `extra_args` | List | No | `[]` | Additional FFmpeg command-line flags. |
+| `existing` | String | No | `replace` | `skip` or `replace`. |
 
-> **Note**: One of `input_path` or `input_files` must be provided. If `input_files` is used, the task automatically generates a temporary concat list for FFmpeg.
-
-## Features
-
-- **Flexible Resizing**: Supports pixel-based dimensions (`width`, `height`).
-- **Smart Fitting**:
-  - Providing both `width` and `height` fits the image within the dimensions and applies black bars (letterboxing).
-  - Providing only one preserves the aspect ratio (automatically ensuring even dimensions for codec compatibility).
-- **Directory Creation**: Automatically creates the parent directory for the `output_path` if it does not exist.
-
-## Popular VFX Codecs
-
-When working in a VFX pipeline, the following codec names are commonly used with the `codec` parameter:
-
-*   **H.264**: `libx264` (Standard for web/reviews)
-*   **Apple ProRes**: `prores_ks` (Standard for intermediate delivery)
-*   **Avid DNxHR/DNxHD**: `dnxhd` (Standard for editorial)
-*   **VP9**: `libvpx-vp9` (High-efficiency open source)
+*\*Required only if the path cannot be inferred from the preceding task.*
 
 ## Example Usage
 
-### Creating a review MP4 from a file list
+### Standard Review Video (Implicit)
+
+This is the most common pattern. The `pathmap` task groups the frames and provides the base path, which `ffmpeg` then uses to create the movie.
+
 ```yaml
-- name: "Create Review Movie"
+- name: "movie_sequence"
+  type: "pathmap"
+  batch: true
+  args:
+    search: "test-burnin"
+    replace: "test-video"
+    reduce: true
+
+- name: "video_file"
   type: "ffmpeg"
   args:
-    input_files: "{{ item.files }}"
-    output_path: "/path/to/review/sequence"
+    fps: 24
     container: "mp4"
-    fps: 23.976
-    codec: "libx264"
-    extra_args: ["-crf", "20", "-preset", "slow"]
+    extra_args: ["-crf", "23", "-preset", "fast"]
 ```
 
-### Creating a ProRes MOV from a pattern
+### Explicit Encoding
+
 ```yaml
-- name: "Render ProRes"
+- name: "manual_video"
   type: "ffmpeg"
   args:
-    input_path: "/path/to/frames/shot.%04d.exr"
-    output_path: "/path/to/delivery/shot.mov"
-    codec: "prores_ks"
-    extra_args: ["-profile:v", "3"] # ProRes 422 HQ
+    input_path: "/path/to/frames/shot.%04d.jpg"
+    output_path: "/path/to/output/shot_review.mp4"
+    fps: 30
+    width: 1920
+    height: 1080
 ```
+
+## Internal Command
+
+The task executes a command similar to:
+`ffmpeg -y -f concat -safe 0 -r <fps> -i <file_list> -c:v <codec> -pix_fmt yuv420p <extra_args> <output_path>`

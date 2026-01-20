@@ -1,59 +1,72 @@
-# OIIO Task (oiiotool)
+# OIIOTool Task
 
-The `oiio` task leverages OpenImageIO's `oiiotool` utility for high-performance image processing. While it currently emphasizes scaling and resizing, it is designed to support arbitrary `oiiotool` operations.
+The `oiio` task uses OpenImageIO's `oiiotool` command-line utility to perform high-quality image resizing and manipulation.
+
+## Implicit Data Flow
+
+Following Crunchize's simplified data model, the `oiio` task automatically resolves its input and output paths:
+
+1.  **Implicit Input**: If preceded by a `pathmap` or transition task, it automatically uses the `src` or `dst` key as the input image.
+2.  **Implicit Output**: It automatically uses the `dst` key from a preceding `pathmap` as the target output path.
+3.  **Automatic Resampling**: By default, it uses high-quality Lanczos resampling for all scaling operations.
 
 ## Parameters
 
-| Name            | Type          | Required | Default | Description                                                                 |
-|-----------------|---------------|----------|---------|-----------------------------------------------------------------------------|
-| `output_path`   | String        | Yes      | -       | Path where the processed image will be saved.                               |
-| `input_path`    | String        | No*      | -       | Path to the source image file.                                              |
-| `width`         | Integer       | No       | -       | Target width in pixels.                                                     |
-| `height`        | Integer       | No       | -       | Target height in pixels.                                                    |
-| `scale`         | Float/String  | No       | -       | Scale factor applied after width/height. e.g., `0.5` becomes `50%`.         |
-| `extra_args`    | List/String   | No       | `[]`    | Additional raw `oiiotool` arguments (e.g., `--colorconvert`, `--ch`).        |
-| `existing`      | String        | No       | `replace`| How to handle existing files: `skip` (save time) or `replace`.              |
+| Name | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `scale` | Float/String | No | - | Scaling factor. Float (e.g., `0.5` for 50%) or String (e.g., `200%`). |
+| `width` | Integer | No | - | Force a specific width in pixels (height scales proportionally). |
+| `height` | Integer | No | - | Force a specific height in pixels (width scales proportionally). |
+| `output_path` | String | No* | - | Target path. Inferred if not provided. |
+| `extra_args` | List/String | No | `[]` | Additional raw `oiiotool` flags (e.g., `--colorconvert`, `--crop`). |
+| `existing` | String | No | `replace` | `skip` or `replace`. |
 
-> **Note**: One of `input_path` or an implicit `item` (provided by the engine via `loop` or `input`) must be present.
-
-## Features
-
-- **Flexible Resizing**: Supports pixel-based dimensions (`width`, `height`) and relative `scale`.
-- **Smart Fitting**:
-  - Providing both `width` and `height` uses `--fit`, which fits the image within the dimensions (letterboxing).
-  - Providing only one preserves the aspect ratio.
-- **Directory Creation**: Automatically creates the parent directory for the `output_path` if it does not exist.
-- **Extensible**: Use `extra_args` to tap into the full power of `oiiotool` for metadata manipulation, color conversions, or channel shuffling.
-- **Dry Run Support**: Logs the full command that would be executed without touching the filesystem.
+*\*Required only if the path cannot be inferred from the preceding task.*
 
 ## Example Usage
 
-### Simple 50% Rescale
+### 1. Scaling for Proxies (Implicit)
+
+This is the standard way to create 50% JPG proxies. The task automatically picks up the source and destination from the previous mapping.
+
 ```yaml
-- name: "Create 50% Proxies"
-  type: "oiio"
-  input: "Source Plates"
+- name: "scale_mapping"
+  type: "pathmap"
   args:
-    output_path: "/path/to/proxy/{{ item.basename }}.jpg"
+    search: "test-proxy"
+    replace: "test-scaled"
+
+- name: "scaled_files"
+  type: "oiio"
+  args:
     scale: 0.5
 ```
 
-### Advanced usage with extra arguments
+### 2. Fixed Dimension Letterboxing
+
+If both `width` and `height` are provided, the image is fitted within the dimensions and padded to the target canvas size.
+
 ```yaml
-- name: "Convert and Add Burn-in"
+- name: "hd_render"
   type: "oiio"
   args:
-    input_path: "/path/to/render.exr"
-    output_path: "/path/to/delivery.tif"
-    scale: "1920x1080"
-    extra_args: 
-      - "--text"
-      - "Shot: TS_001"
-      - "--colorconvert"
-      - "linear"
-      - "sRGB"
+    width: 1920
+    height: 1080
+```
+
+### 3. Advanced Manipulation
+
+You can pass arbitrary arguments directly to `oiiotool` using `extra_args`.
+
+```yaml
+- name: "custom_process"
+  type: "oiio"
+  args:
+    scale: 1.0
+    extra_args: ["--colorconvert", "linear", "sRGB", "--crop", "100,100,800,600"]
 ```
 
 ## Internal Command
-The task constructs and executes a command similar to:
-`oiiotool <input_path> [--fit <width>x<height> | --resize <width>x0] [--resize <scale>] [extra_args] -o <output_path>`
+
+The task executes the following system command:
+`oiiotool <input_path> --resize <geometry> <extra_args> -o <output_path>`

@@ -16,14 +16,12 @@ class ThumbnailTask(BaseTask):
         Validate required arguments.
         """
         # We need an output path for the thumbnail
-        if "output_path" not in self.args:
-            raise ValueError("ThumbnailTask requires 'output_path'.")
+        if "output_path" not in self.args and "item" not in self.args:
+            raise ValueError("ThumbnailTask requires 'output_path' or 'item'.")
 
         # We need a list of files to pick from
         if "input_files" not in self.args and "item" not in self.args:
-            raise ValueError(
-                "ThumbnailTask requires 'input_files' or implicit 'item' list."
-            )
+            raise ValueError("ThumbnailTask requires 'input_files' or 'item' sequence.")
 
         existing = self.args.get("existing", "replace")
         if existing not in ["skip", "replace"]:
@@ -33,14 +31,33 @@ class ThumbnailTask(BaseTask):
 
     def run(self) -> Optional[str]:
         """
-        Execute the thumbnail generation.
+        Execute the thumbnail generation based on provided sequence.
         """
-        # 1. Resolve input files
-        # It can be a list passed explicitly or the 'item' if we are in a loop/batch
-        input_files = self.args.get("input_files") or self.args.get("item")
+        item = self.args.get("item")
+        input_files = self.args.get("input_files")
 
-        if not isinstance(input_files, list) or not input_files:
+        # Sequence Inference: Automatically extract file list from sequence objects.
+        if not input_files and isinstance(item, dict) and "files" in item:
+            input_files = item["files"]
+
+        # Direct list support.
+        if not input_files and isinstance(item, list):
+            input_files = item
+
+        if not input_files or not isinstance(input_files, list):
             self.logger.warning("ThumbnailTask received no file list to process.")
+            return None
+
+        # Framework path resolution: Resolve string paths from framework items.
+        input_files = [
+            self._resolve_path_from_item(f, prioritize_file=True)
+            for f in input_files
+            if f
+        ]
+        input_files = [f for f in input_files if f]
+
+        if not input_files:
+            self.logger.warning("ThumbnailTask could not resolve any input file paths.")
             return None
 
         # 2. Pick the source frame based on sourcelocation (relative 0.0 to 1.0)
@@ -59,8 +76,17 @@ class ThumbnailTask(BaseTask):
             f"Picked frame for thumbnail: {source_frame} (Index {index}/{len(input_files)})"
         )
 
-        # 3. Handle output path and format
-        output_path = self.args["output_path"]
+        # Output resolution: Inferred from sequence base_path or framework heuristics.
+        output_path = self.args.get("output_path")
+        if not output_path:
+            if isinstance(item, dict) and "base_path" in item:
+                output_path = item["base_path"]
+            else:
+                output_path = self._resolve_path_from_item(item, prioritize_file=False)
+
+        if not output_path:
+            raise ValueError("ThumbnailTask could not determine 'output_path'.")
+
         output_format = self.args.get("format", "jpg").lstrip(".")
 
         # Ensure output path has the correct extension
@@ -83,9 +109,8 @@ class ThumbnailTask(BaseTask):
             if not self.dry_run:
                 os.makedirs(output_dir, exist_ok=True)
 
-        # 5. Build oiiotool command
-        # oiiotool source.exr --resize widthx0 -o thumb.jpg
-        # widthx0 tells oiiotool to scale height proportionally
+        # Construct system command for OpenImageIO's oiiotool CLI.
+        # Format: oiiotool <source> --resize <Wx0> -o <target>
         cmd = ["oiiotool", source_frame]
 
         if width:

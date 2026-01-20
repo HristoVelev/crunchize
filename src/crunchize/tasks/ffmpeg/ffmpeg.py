@@ -9,19 +9,28 @@ from crunchize.tasks.base import BaseTask
 class FFmpegTask(BaseTask):
     """
     Task to encode video using FFmpeg.
+
+    Supports both image sequence patterns (shot.%04d.jpg) and explicit file lists
+    via the FFmpeg concat demuxer.
     """
 
     def validate_args(self) -> None:
         """
         Validate required arguments.
         """
-        if "output_path" not in self.args:
-            raise ValueError("FFmpegTask requires 'output_path'.")
+        if "output_path" not in self.args and "item" not in self.args:
+            raise ValueError(
+                "FFmpegTask requires 'output_path' or 'item' for inference."
+            )
 
-        # input_path is usually required, but might be implicit if we support list inputs later.
-        # For now, require it.
-        if "input_path" not in self.args and "input_files" not in self.args:
-            raise ValueError("FFmpegTask requires 'input_path' or 'input_files'.")
+        if (
+            "input_path" not in self.args
+            and "input_files" not in self.args
+            and "item" not in self.args
+        ):
+            raise ValueError(
+                "FFmpegTask requires 'input_path', 'input_files', or 'item'."
+            )
 
         existing = self.args.get("existing", "replace")
         if existing not in ["skip", "replace"]:
@@ -31,19 +40,48 @@ class FFmpegTask(BaseTask):
 
     def run(self) -> str:
         """
-        Execute ffmpeg command.
+        Execute the FFmpeg command based on provided arguments.
         """
+        item = self.args.get("item")
         input_path = self.args.get("input_path")
         input_files = self.args.get("input_files")
-        output_path = self.args["output_path"]
 
-        # Resolve fps/framerate (fps takes precedence)
+        # Sequence Inference: In the simplified model, 'item' is often a sequence object
+        # containing a 'files' list and a 'base_path'.
+        if not input_files and isinstance(item, dict) and "files" in item:
+            input_files = item["files"]
+
+        # If no input is provided, try to infer a single input_path from context.
+        if not input_path and not input_files:
+            input_path = self._resolve_path_from_item(item, prioritize_file=True)
+
+        # Resolve output path: Prioritize base_path from mapping or inferred output location.
+        output_path = self.args.get("output_path")
+        if not output_path:
+            if isinstance(item, dict) and "base_path" in item:
+                output_path = item["base_path"]
+            else:
+                output_path = self._resolve_path_from_item(item, prioritize_file=False)
+
+        if not output_path:
+            raise ValueError("FFmpegTask could not determine 'output_path'.")
+
+        # If input_files contains framework objects, resolve them to actual strings.
+        if isinstance(input_files, list):
+            input_files = [
+                self._resolve_path_from_item(f, prioritize_file=True)
+                for f in input_files
+                if f
+            ]
+            input_files = [f for f in input_files if f]
+
+        # Resolve timing: 'fps' is the preferred key, 'framerate' is supported as an alias.
         framerate = self.args.get("fps") or self.args.get("framerate", 24)
 
         width = self.args.get("width")
         height = self.args.get("height")
 
-        # Support container override
+        # Container handling: Support overriding the extension (e.g. force .mp4).
         container = self.args.get("container")
         if container:
             container = container.lstrip(".")
@@ -74,25 +112,21 @@ class FFmpegTask(BaseTask):
 
         cmd = ["ffmpeg"]
 
+        # Always overwrite by default if replace mode is on.
         if existing == "replace":
             cmd.append("-y")
 
-        # Input handling
+        # Input Handling Strategy:
         if input_files and isinstance(input_files, list):
-            # If we have a list of explicit files, use the concat demuxer
-            # We need to create a temporary file list
-            # Note: In a real robust system, we should use tempfile module and cleanup
-            # taking simplified approach for clarity, or assuming input_path is preferred.
-
-            # For this implementation, let's assume input_path (pattern) is the primary way
-            # and input_files (list) is mapped to a concat list.
+            # Use Concat Demuxer: Essential for sequences with non-sequential numbering
+            # or mixed sources. We generate a temporary file list for FFmpeg.
             list_file_path = f"{output_path}.filelist.txt"
 
             if not self.dry_run:
                 try:
                     with open(list_file_path, "w") as f:
                         for file_path in input_files:
-                            # escapte paths?
+                            # FFmpeg concat format: file '/path/to/image.jpg'
                             f.write(f"file '{file_path}'\n")
                 except IOError as e:
                     raise RuntimeError(f"Failed to create concat file list: {e}")
@@ -112,24 +146,19 @@ class FFmpegTask(BaseTask):
                 ]
             )
 
-            # Concat doesn't handle framerate on input easily for image sequences the same way pattern does
-            # often need -r before input or filters.
-            # Usually users use patterns for image sequences.
-            # If input_files is used, assume it's a sequence of video clips or we just force framerate on output.
-
         elif input_path:
-            # Standard pattern or file input
+            # Standard Pattern: Efficient for large, sequential image sequences (e.g. shot.%04d.exr)
             if start_frame is not None:
                 cmd.extend(["-start_number", str(start_frame)])
 
-            # Apply framerate to input for image sequences to establish timebase
+            # Establishment of timebase before input for image sequences.
             cmd.extend(["-framerate", str(framerate)])
             cmd.extend(["-i", input_path])
 
-        # Output options
+        # Output configuration
         codec = self.args.get("codec")
 
-        # Ensure we use libx264 by default if no codec specified
+        # Default to libx264 for high compatibility if no codec is provided.
         if (
             not codec
             and not any("-c:v" in arg for arg in extra_args)
@@ -143,20 +172,19 @@ class FFmpegTask(BaseTask):
             if codec == "libx264" and not any("-pix_fmt" in arg for arg in extra_args):
                 cmd.extend(["-pix_fmt", "yuv420p"])
 
-        # Add scaling / letterboxing filters
+        # Filter Graph: Scaling and Letterboxing.
         if width or height:
             if width and height:
-                # Fit within width x height and pad to canvas (letterbox)
-                # force_original_aspect_ratio=decrease fits the image inside
+                # Automatic Letterboxing: Fit image inside target resolution and pad with black bars.
                 scale_filter = (
                     f"scale=w={width}:h={height}:force_original_aspect_ratio=decrease,"
                     f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
                 )
             elif width:
-                # Fixed width, preserve aspect (use -2 to ensure height is even for YUV420)
+                # Fixed Width: Preserve aspect ratio. Use -2 to ensure height is even (H.264 requirement).
                 scale_filter = f"scale={width}:-2"
             else:
-                # Fixed height, preserve aspect (use -2 to ensure width is even for YUV420)
+                # Fixed Height.
                 scale_filter = f"scale=-2:{height}"
 
             cmd.extend(["-vf", scale_filter])
@@ -177,7 +205,7 @@ class FFmpegTask(BaseTask):
             return output_path
 
         try:
-            # Capture output to avoid spamming console, but log if error
+            # Execute FFmpeg and capture streams to avoid console flooding.
             result = subprocess.run(
                 cmd,
                 check=True,

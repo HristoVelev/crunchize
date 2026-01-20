@@ -1,48 +1,83 @@
-# PathMap Task
+# Path Mapping Task
 
-The `pathmap` task is a powerful utility for manipulating file paths and strings within a workflow. It is essential for rerooting paths (e.g., changing `/mnt/plates` to `/tmp/work`), changing directory structures, or grouping individual frames into sequence objects for batch processing.
+The `pathmap` task is a versatile tool for manipulating file paths. It is primarily used for **rerooting** (changing base directories) or **sequence reduction** (grouping individual frames into shot objects).
+
+## Simplified Data Model
+
+In the modern Crunchize pipeline, the `pathmap` task acts as a bridge between storage locations. 
+
+- **Individual Mapping**: When mapping single files (default), it returns a mapping object: `{"src": original_path, "dst": mapped_path}`. This allows downstream processing tasks (like `convert` or `oiio`) to automatically resolve their input and output requirements.
+- **Implicit Input**: It prioritizes the `dst` key of a previous task as its new `src`, enabling effortless chaining.
 
 ## Parameters
 
-| Name         | Type    | Required | Default | Description                                                                                   |
-|--------------|---------|----------|---------|-----------------------------------------------------------------------------------------------|
-| `search`     | String  | Yes      | -       | The substring to search for in the source path.                                               |
-| `replace`    | String  | Yes      | -       | The string to replace the search match with.                                                  |
-| `input_path` | String  | No       | -       | Explicit source string. If not provided, the task uses the implicit `item` from the engine.   |
-| `output_key` | String  | No       | -       | If provided, the task returns a dictionary containing the new path under this key.            |
-| `input_key`  | String  | No       | -       | If the input is a dictionary, use this key as the source string.                              |
-| `reduce`     | Boolean | No       | `false` | (Batch mode only) If true, groups files into sequences and returns a list of sequence objects. |
+| Name | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `search` | String | Yes | - | The string or pattern to find in the path. |
+| `replace` | String | Yes | - | The replacement string. |
+| `regex` | Boolean | No | `false` | If true, `search` and `replace` are treated as regular expressions. |
+| `reduce` | Boolean | No | `false` | (Batch only) If true, groups mapped files into sequence objects. |
+| `input_key` | String | No | - | Force mapping on a specific dictionary key. |
 
-## Features
+## Sequence Reduction (`reduce: true`)
 
-- **Smart Separators**: If the `search` string ends with a path separator (`/` or `\`) but the `replace` string does not, the task automatically appends the separator to maintain path integrity.
-- **Sequence Reduction**: When `batch: true` and `reduce: true` are set, the task identifies image sequences (e.g., `shot.1001.exr`, `shot.1002.exr`) and groups them into a single object containing a list of files and a mapped base path.
-- **Context Preservation**: When using `output_key`, the task returns the original input dictionary (if applicable) merged with the new mapped value, preserving metadata across the pipeline.
+When used with `batch: true` and `reduce: true`, this task transforms a flat list of files into a list of **sequence objects**. This is a critical step before tasks that operate on entire shots, such as `ffmpeg`.
+
+**Output Structure:**
+```json
+{
+  "files": ["/path/shot.0001.jpg", "/path/shot.0002.jpg", ...],
+  "base_path": "/path/shot"
+}
+```
 
 ## Example Usage
 
-### Simple Path Rerooting
+### 1. Rerooting for Conversion
+Prepares a destination path for a subsequent processing task.
+
 ```yaml
-- name: "Map Plates to Work"
+- name: "proxy_mapping"
   type: "pathmap"
-  input: "Find Source Plates"
   args:
-    search: "/mnt/prod/plates/"
-    replace: "/tmp/local_work/"
+    search: "/mnt/prod/PLATES"
+    replace: "/tmp/PROXIES"
+
+- name: "convert_task"
+  type: "convert"
+  # Automatically uses 'src' as input and 'dst' as output from proxy_mapping
+  args:
+    output_format: "jpg"
+    ...
 ```
 
-### Sequence Reduction for Video Encoding
+### 2. Shot Grouping for Video
+Groups multiple frames into a single sequence object for encoding.
+
 ```yaml
-- name: "Group Frames for Video"
+- name: "movie_sequence"
   type: "pathmap"
   batch: true
-  input: "Scaled JPGs"
   args:
-    reduce: true
-    search: "/scaled/"
-    replace: "/movies/"
-    output_key: "video_base"
+    search: "test-burnin"
+    replace: "test-video"
+    reduce: true  # Combines all frames into a single sequence object
+
+- name: "video_file"
+  type: "ffmpeg"
+  # Automatically uses 'files' from movie_sequence as input
+  args:
+    fps: 24
 ```
 
-## Internal Operation
-The task uses standard string replacement and regular expression patterns to identify frame numbers and extensions. It is highly optimized for handling large lists of files in batch mode.
+### 3. Regex Renaming
+Advanced path manipulation using regular expressions.
+
+```yaml
+- name: "version_bump"
+  type: "pathmap"
+  args:
+    regex: true
+    search: "_v(\\d+)"
+    replace: "_v099" # Simple string replacement or back-references
+```

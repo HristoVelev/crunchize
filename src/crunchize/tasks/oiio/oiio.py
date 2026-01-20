@@ -16,11 +16,11 @@ class OIIOToolTask(BaseTask):
         Validate required arguments.
         Requires 'output_path' and either 'input_path' or implicit 'item'.
         """
-        if "output_path" not in self.args:
-            raise ValueError("OIIOToolTask requires 'output_path'.")
+        if "output_path" not in self.args and "item" not in self.args:
+            raise ValueError("OIIOToolTask requires 'output_path' or 'item'.")
 
         if "input_path" not in self.args and "item" not in self.args:
-            raise ValueError("OIIOToolTask requires 'input_path' or implicit 'item'.")
+            raise ValueError("OIIOToolTask requires 'input_path' or 'item'.")
 
         existing = self.args.get("existing", "replace")
         if existing not in ["skip", "replace"]:
@@ -30,11 +30,24 @@ class OIIOToolTask(BaseTask):
 
     def run(self) -> str:
         """
-        Execute oiiotool command.
+        Execute the oiiotool command based on provided arguments.
         """
-        # Resolve input path (explicit > implicit)
-        input_path = self.args.get("input_path") or self.args.get("item")
-        output_path = self.args["output_path"]
+        # Resolve input and output paths using the framework's inference heuristics.
+        # This allows the task to work seamlessly in implicit pipelines.
+        item = self.args.get("item")
+        input_path = self.args.get("input_path") or self._resolve_path_from_item(
+            item, prioritize_file=True
+        )
+
+        # Resolve output path (explicit > inferred)
+        output_path = self.args.get("output_path") or self._resolve_path_from_item(
+            item, prioritize_file=False
+        )
+
+        if not input_path:
+            raise ValueError("OIIOToolTask could not determine 'input_path'.")
+        if not output_path:
+            raise ValueError("OIIOToolTask could not determine 'output_path'.")
 
         # Check if output already exists
         existing = self.args.get("existing", "replace")
@@ -59,23 +72,23 @@ class OIIOToolTask(BaseTask):
                         f"Failed to create output directory {output_dir}: {e}"
                     )
 
-        # Build command: oiiotool input [ops] -o output
+        # Build the system command for OpenImageIO's oiiotool CLI.
         cmd = ["oiiotool", input_path]
 
-        # Apply fixed dimensions if requested
+        # Handle explicit dimensions (width/height).
         if width and height:
-            # Fit within width x height and pad to canvas size (letterbox)
+            # Fit within width x height and pad to target canvas size (letterboxing).
             cmd.extend(["--fit", f"{width}x{height}", "--canvas", f"{width}x{height}"])
         elif width:
-            # Preserve aspect ratio based on width
+            # Scale proportionally based on target width.
             cmd.extend(["--resize", f"{width}x0"])
         elif height:
-            # Preserve aspect ratio based on height
+            # Scale proportionally based on target height.
             cmd.extend(["--resize", f"0x{height}"])
 
-        # Apply scaling if requested
+        # Apply additional scaling if requested (can be used independently or combined).
         if scale:
-            # Handle float scale (e.g. 0.5 -> "50%")
+            # Automatically handle float scales (e.g., 0.5 -> "50%").
             if isinstance(scale, float):
                 scale_str = f"{scale * 100}%"
             else:
@@ -90,6 +103,7 @@ class OIIOToolTask(BaseTask):
             else:
                 cmd.extend(extra_args.split())
 
+        # Specify the output path.
         cmd.extend(["-o", output_path])
 
         self.logger.info(f"Executing: {' '.join(cmd)}")

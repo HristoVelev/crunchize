@@ -10,6 +10,7 @@ from crunchize.tasks.base import BaseTask
 class FileInTask(BaseTask):
     """
     Task to gather files using glob patterns.
+    This is typically the entry point for a pipeline.
     """
 
     def validate_args(self) -> None:
@@ -21,7 +22,7 @@ class FileInTask(BaseTask):
 
     def run(self) -> List[str]:
         """
-        Run the glob pattern and return the list of matched files.
+        Execute the file discovery based on glob pattern.
         """
         pattern = self.args["pattern"]
         recursive = self.args.get("recursive", False)
@@ -30,8 +31,9 @@ class FileInTask(BaseTask):
             f"Searching for files with pattern: {pattern} (recursive={recursive})"
         )
 
-        # Globbing is safe to run in dry_run as it is read-only
+        # Globbing is safe to run in dry_run as it is a read-only operation.
         matches = glob.glob(pattern, recursive=recursive)
+        # Ensure consistent order across different filesystems.
         matches.sort()
 
         self.logger.info(f"Found {len(matches)} files.")
@@ -42,7 +44,9 @@ class FileInTask(BaseTask):
         return matches
 
     def _format_ranges(self, frames: List[int]) -> str:
-        """Format a list of integers into a range string (e.g. '1001-1005, 1007')."""
+        """
+        Format a list of integers into a human-readable range string (e.g. '1001-1005, 1007').
+        """
         if not frames:
             return ""
         frames.sort()
@@ -70,10 +74,12 @@ class FileInTask(BaseTask):
         return ", ".join(ranges)
 
     def log_sequences(self, matches: List[str]) -> None:
-        """Log matches grouped by sequence."""
+        """
+        Group discovered files by sequence for informative logging.
+        """
         groups = defaultdict(list)
-        # Regex to capture: Base, Separator, Frame, Extension
-        pattern = re.compile(r"^(.*)([._])(\d+)(\..+)$")
+        # Identify standard VFX naming conventions: base + separator + frame + ext.
+        pattern = re.compile(r"^(.*?)([._])(\d+)(\.[a-zA-Z0-9]+)$")
 
         for m in matches:
             match = pattern.match(m)
@@ -84,7 +90,7 @@ class FileInTask(BaseTask):
                 # Non-sequence file
                 groups[(m, "", "")].append(None)
 
-        # Sort by base name for logging
+        # Sort by base name to present a clean summary in the logs.
         for (base, sep, ext), frames in sorted(groups.items(), key=lambda x: x[0]):
             if frames[0] is None:
                 self.logger.info(f"  - {base}")

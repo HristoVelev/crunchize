@@ -13,14 +13,19 @@ class ConvertTask(BaseTask):
         """
         Validate that all required arguments are present.
         """
+        # OCIO-specific required parameters
         required = [
-            "input_path",
-            "output_path",
             "config_path",
             "input_space",
             "output_space",
         ]
         missing = [arg for arg in required if arg not in self.args]
+
+        # Input and output paths can be explicit or inferred from the framework item
+        if "input_path" not in self.args and "item" not in self.args:
+            missing.append("input_path")
+        if "output_path" not in self.args and "item" not in self.args:
+            missing.append("output_path")
 
         if missing:
             raise ValueError(
@@ -42,15 +47,30 @@ class ConvertTask(BaseTask):
         """
         Execute the ocioconvert command.
         """
-        input_path = self.args["input_path"]
-        output_path = self.args["output_path"]
+        item = self.args.get("item")
+
+        # Automatically resolve paths using the framework's inference engine.
+        # This allows 'convert' to work seamlessly after 'pathmap'.
+        input_path = self.args.get("input_path") or self._resolve_path_from_item(
+            item, prioritize_file=True
+        )
+        output_path = self.args.get("output_path") or self._resolve_path_from_item(
+            item, prioritize_file=False
+        )
+
+        if not input_path:
+            raise ValueError("ConvertTask could not determine 'input_path'.")
+        if not output_path:
+            raise ValueError("ConvertTask could not determine 'output_path'.")
+
         config_path = self.args["config_path"]
         input_space = self.args["input_space"]
         output_space = self.args["output_space"]
         output_format = self.args.get("output_format")
 
+        # If a specific format is requested, ensure the file extension is updated.
+        # This is vital when converting from .exr to .jpg proxies.
         if output_format:
-            # Strip dot if present
             output_format = output_format.lstrip(".")
             base, ext = os.path.splitext(output_path)
             if ext.lower() != f".{output_format}".lower():
@@ -75,6 +95,7 @@ class ConvertTask(BaseTask):
                         f"Failed to create output directory {output_dir}: {e}"
                     )
 
+        # Construct the system command for OpenColorIO's CLI tool.
         cmd = [
             "ocioconvert",
             "--iconfig",

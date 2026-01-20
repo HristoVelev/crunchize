@@ -1,123 +1,162 @@
 ---
 config:
-  # every_nth: 1
-  # wipe_log: false
-  file_amount: 1.0
+  file_amount: 0.1
+  wipe_log: true
 
 vars:
   # Input Configuration
-  root_dir: "/mnt/prod/projects/dra/global/input/2026-01-07--001/PLATES"
-  input_pattern: "{{ root_dir }}/test*/*.exr"
+  root_dir: "/mnt/prod/projects/dra/global/input/2026-01-07--001/PLATES/*010/"
+  input_pattern: "{{ root_dir }}/*.exr"
 
-  # Output/Work Configuration
+  # Base directory for all generated outputs
   work_dir: "/tmp/crunchize_work"
-  # OCIO Configuration (Adjust paths as needed for your environment)
+
+  # OCIO Configuration for high-quality proxies
   ocio_config: "/mnt/prod/bin/aces/studio-config-v4.0.0_aces-v2.0_ocio-v2.5.ocio"
   input_space: "ACES2065-1"
   output_space: "Rec.1886 Rec.709 - Display"
 
 tasks:
   # 1. Gather Input Files
-  - name: "Find Source Plates"
+  # Returns: ["/path/to/shot.1001.exr", ...]
+  - name: "source_files"
     type: "filein"
     args:
       pattern: "{{ input_pattern }}"
 
-  # 2. Prepare paths for conversion (Map Input Root -> Work Dir)
-  - name: "exr to jpg paths"
+  # 2. Map Proxy Paths (Reroot: PLATES -> test-proxy)
+  # Implicitly takes 'source_files' as input.
+  # Returns: [{"src": ".../PLATES/shot.1001.exr", "dst": ".../test-proxy/shot.1001.exr"}, ...]
+  - name: "proxy_mapping"
     type: "pathmap"
-    input: "Find Source Plates"
     args:
       search: "PLATES"
       replace: "test-proxy"
-      output_key: "convert_dest"
 
-  # 3. Convert to JPG (OCIO)
-  - name: "exr to jpg convert"
+  # 3. Convert EXR to high-res JPG proxies
+  # Implicitly takes 'proxy_mapping' as input.
+  # Returns: [".../test-proxy/shot.1001.jpg", ...]
+  - name: "proxy_files"
     type: "convert"
-    input: "exr to jpg paths"
-    # Registers the list of generated JPG paths
-    register: "jpg_files"
     args:
-      input_path: "{{ item }}" # Original EXR from 'Find Source Plates'
-      output_path: "{{ convert_dest }}" # Mapped path
-      output_format: "jpg" # Force extension to .jpg
+      output_format: "jpg"
       config_path: "{{ ocio_config }}"
       input_space: "{{ input_space }}"
       output_space: "{{ output_space }}"
 
-  # 4. Prepare paths for scaling (Map /converted/ -> /scaled/)
-  - name: "scale paths"
+  # 4. Map Scaled Paths (Reroot: test-proxy -> test-scaled)
+  - name: "scale_mapping"
     type: "pathmap"
-    input: "exr to jpg convert" # Input is the list of JPGs from previous task
     args:
       search: "test-proxy"
       replace: "test-scaled"
-      output_key: "scale_dest"
 
-  # 5. Scale Images (OIIO)
-  - name: "Scale to 50%"
+  # 5. Resize images to 50% for review
+  - name: "scaled_files"
     type: "oiio"
-    input: "scale paths"
-    # Registers the list of scaled JPG paths
-    register: "scaled_files"
     args:
-      input_path: "{{ item }}" # Input is the converted JPG
-      output_path: "{{ scale_dest }}"
       scale: 0.5
 
-  # 6. Prepare Video Paths (Group sequences and map to output)
-  - name: "Video paths"
+  # 6. Extract Metadata from first proxy frame
+  # Explicitly points back to proxy_files.
+  - name: "meta"
+    type: "parsepath"
+    batch: true
+    args:
+      input_path: "{{ proxy_files[0] }}"
+      pattern: "(?i).*/(?P<seq>[A-Z0-9]+)_(?P<shot_id>\\d+)_(?P<dept>[A-Z0-9]+)_v?(?P<ver>\\d+)\\.(?P<orig_frame>\\d+)\\.jpg"
+
+  # 7. Map Burn-in Paths (Reroot: test-scaled -> test-burnin)
+  - name: "burnin_mapping"
+    type: "pathmap"
+    input: "scaled_files"
+    args:
+      search: "test-scaled"
+      replace: "test-burnin"
+
+  # 8. Apply Metadata Burn-in (Per-frame)
+  - name: "burnin_files"
+    type: "inscribe"
+    args:
+      type: "burnin"
+      groups:
+        - anchor: "top-left"
+          items:
+            - type: "text"
+              source: "SEQ: {{ meta.seq }} SHOT: {{ meta.shot_id }}"
+              size: 0.015
+        - anchor: "bottom-left"
+          items:
+            - type: "text"
+              source: "{{ filename }}"
+              size: 0.015
+        - anchor: "bottom-right"
+          items:
+            - type: "text"
+              source: "{{ frame }}"
+              size: 0.02
+
+  # 9. Map Slate Path (Reroot: test-burnin -> test-slate)
+  - name: "slate_mapping"
+    type: "pathmap"
+    args:
+      search: "test-burnin"
+      replace: "test-slate"
+
+  # 10. Add Slate (Prepended to sequence, written to test-slate folder)
+  # Returns: [slate_path, burnin_file1, burnin_file2, ...]
+  - name: "sequence_with_slate"
+    type: "inscribe"
+    batch: true
+    args:
+      type: "slate"
+      groups:
+        - anchor: "mid-mid"
+          layout: "vertical"
+          alignment: "center"
+          items:
+            - type: "text"
+              source: "SHOT: {{ meta.seq }}_{{ meta.shot_id }}"
+              size: 0.08
+            - type: "text"
+              source: "STATUS: WORK IN PROGRESS"
+              size: 0.04
+
+  # 11. Group Slate and Burnin Frames for Video (Reroot to test-video)
+  # Returns: [{"files": [...], "base_path": ".../test-video/seq_shot..."}]
+  - name: "movie_sequence"
     type: "pathmap"
     batch: true
-    input: "Scale to 50%"
     args:
+      regex: true
+      search: "/test-[^/]+/"
+      replace: "/test-video/"
       reduce: true
-      search: "test-scaled"
-      replace: "test-video"
-      output_key: "video_base"
 
-  # 7. Create Video (FFmpeg)
-  - name: "video create"
+  # 12. Create Review Video (FFmpeg)
+  - name: "video_file"
     type: "ffmpeg"
-    input: "Video paths"
     args:
-      input_files: "{{ item.files }}"
-      output_path: "{{ item.video_base }}"
       fps: 24
       container: "mp4"
-      # Popular VFX codecs: libx264 (H.264), prores_ks (ProRes), dnxhd (DNxHR), libvpx-vp9 (VP9)
       codec: "libx264"
-      overwrite: true
+      existing: "replace"
       extra_args: ["-crf", "23", "-preset", "fast"]
 
-  # 8. Prepare Thumbnail Paths (Map PLATES -> test-thumbs)
-  - name: "Thumbnail paths"
+  # 13. Map Thumbnail Paths
+  - name: "thumb_mapping"
     type: "pathmap"
     batch: true
-    input: "Find Source Plates"
+    input: "source_files"
     args:
       reduce: true
       search: "PLATES"
       replace: "test-thumbs"
-      output_key: "thumb_base"
 
-  # 9. Generate Sequence Thumbnail
-  - name: "sequence thumbnail"
+  # 14. Generate Mid-Sequence Poster Frame (Thumbnail)
+  - name: "thumb_file"
     type: "thumbnail"
-    input: "Thumbnail paths"
     args:
-      input_files: "{{ item.files }}"
-      output_path: "{{ item.thumb_base }}"
       sourcelocation: 0.5
       size: 480
       format: "jpg"
-
-  # # 9. Cleanup Intermediate Files
-  # - name: "Cleanup Converted"
-  #   type: "delete"
-  #   input: "Color Convert" # Deletes the intermediate full-res JPGs
-
-  # - name: "Cleanup Scaled"
-  #   type: "delete"
-  #   input: "Scale to 50%" # Deletes the intermediate scaled JPGs

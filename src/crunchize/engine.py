@@ -3,8 +3,9 @@ import importlib
 import logging
 import os
 import re
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
 
 import yaml
 
@@ -13,8 +14,10 @@ def run_task_wrapper(
     task_cls, args: Dict[str, Any], dry_run: bool, task_info: str = None
 ):
     """
-    Wrapper function to instantiate and run a task.
-    Must be at module level for ProcessPoolExecutor pickling.
+    Isolated wrapper to instantiate and execute a task.
+
+    This function must remain at the module level to be picklable by
+    ProcessPoolExecutor for parallel processing across multiple CPU cores.
     """
     if task_info:
         setattr(logging, "_crunchize_task_context", task_info)
@@ -25,6 +28,12 @@ def run_task_wrapper(
 class CrunchizeEngine:
     """
     Core engine for parsing playbooks and executing tasks.
+
+    The engine manages:
+    - Playbook and global configuration loading.
+    - Recursive variable and template resolution (Jinja2-style).
+    - Implicit and explicit data flow between tasks.
+    - Parallel execution and sequence-aware filtering.
     """
 
     def __init__(
@@ -32,6 +41,8 @@ class CrunchizeEngine:
         playbook_path: str,
         dry_run: bool = False,
         file_amount: float = 1.0,
+        every_nth: int = None,
+        extra_vars: Dict[str, Any] = None,
     ):
         self.playbook_path = Path(playbook_path)
         self.dry_run = dry_run
@@ -44,11 +55,13 @@ class CrunchizeEngine:
         # Load global defaults
         self.globals = self._load_globals()
 
-        # Resolve every_nth from playbook or globals
-        playbook_config = self.playbook.get("config") or {}
-        self.every_nth = playbook_config.get("every_nth")
+        # Resolve every_nth from playbook or globals (CLI override takes precedence)
+        self.every_nth = every_nth
         if self.every_nth is None:
-            self.every_nth = self.globals.get("every_nth", 1)
+            playbook_config = self.playbook.get("config") or {}
+            self.every_nth = playbook_config.get("every_nth")
+            if self.every_nth is None:
+                self.every_nth = self.globals.get("every_nth", 1)
 
         # Resolve file_amount from playbook or globals (CLI override takes precedence if not 1.0)
         if self.file_amount == 1.0:
@@ -64,6 +77,16 @@ class CrunchizeEngine:
         if "vars" in self.playbook:
             self.variables.update(self.playbook["vars"])
 
+        # Overload with CLI extra_vars
+        if extra_vars:
+            self.variables.update(extra_vars)
+
+        # Resolve variables against each other (except task_results which we want live)
+        self.variables = self._resolve_variable(self.variables, self.variables)
+
+        # Provide access to raw task results in templates (as a live reference)
+        self.variables["task_results"] = self.task_results
+
     def _load_globals(self) -> Dict[str, Any]:
         """Load global defaults from config.yml."""
         # Look for config.yml in a few likely places
@@ -78,13 +101,17 @@ class CrunchizeEngine:
             if p.exists():
                 try:
                     with open(p, "r") as f:
-                        return yaml.safe_load(f) or {}
+                        data = yaml.safe_load(f)
+                        return data if isinstance(data, dict) else {}
                 except yaml.YAMLError as e:
                     self.logger.warning(f"Error parsing config YAML at {p}: {e}")
         return {}
 
     def _setup_global_config(self):
-        """Configure logging and other global settings based on globals and playbook overrides."""
+        """
+        Configure logging and global engine settings.
+        Playbook-level configuration takes precedence over global defaults.
+        """
         # Log path
         playbook_config = self.playbook.get("config") or {}
         log_path = playbook_config.get("log_path")
@@ -141,7 +168,8 @@ class CrunchizeEngine:
 
         with open(self.playbook_path, "r") as f:
             try:
-                return yaml.safe_load(f) or {}
+                data = yaml.safe_load(f)
+                return data if isinstance(data, dict) else {}
             except yaml.YAMLError as e:
                 raise ValueError(f"Error parsing YAML: {e}")
 
@@ -149,55 +177,141 @@ class CrunchizeEngine:
         self, value: Any, context: Dict[str, Any], depth: int = 0
     ) -> Any:
         """
-        Recursively substitute {{ variable }} in strings, lists, and dicts.
+        Recursively substitute {{ variable }} templates in strings, lists, and dicts.
+
+        Supports:
+        - Nested access: {{ task.key.subkey }}
+        - Bracketed access: {{ task['Complex Key Name'] }}
+        - List indexing: {{ results[0] }}
+        - Filters: | basename, | dirname, | replace('old', 'new'), | map(attribute='...')
         """
         if depth > 10:
             self.logger.warning(f"Max recursion depth reached resolving: {value}")
             return value
 
         if isinstance(value, str):
-            # Find all {{ var }} patterns (supports simple dot notation for dicts)
-            pattern = r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}"
-            matches = re.findall(pattern, value)
+            # Check if the whole string is exactly one template {{ ... }} (robust to whitespace)
+            full_match = re.fullmatch(r"^\s*\{\{\s*(?P<expr>[^}]+)\s*\}\}\s*$", value)
 
-            if not matches:
-                return value
+            def resolve_expr(expr_str):
+                # Remove outer parentheses if any (e.g. (task_results['a'])[0])
+                expr_str = expr_str.strip()
+                while expr_str.startswith("(") and expr_str.endswith(")"):
+                    expr_str = expr_str[1:-1].strip()
 
-            new_value = value
-            for var_name in matches:
+                # Handle filters (e.g. var | filter1 | filter2)
+                if "|" in expr_str:
+                    parts = [x.strip() for x in expr_str.split("|")]
+                    var_expr = parts[0].strip()
+                    filters = parts[1:]
+                else:
+                    var_expr = expr_str.strip()
+                    filters = []
+
                 var_val = None
                 found = False
 
-                # Handle dot notation (e.g., item.files)
-                if "." in var_name:
-                    parts = var_name.split(".")
-                    if parts[0] in context:
-                        var_val = context[parts[0]]
-                        try:
-                            for part in parts[1:]:
-                                if isinstance(var_val, dict):
-                                    var_val = var_val[part]
+                # Robust part extraction: identifiers or bracketed content
+                # (e.g. identifiers, [0], ['key'], ["key"])
+                path_parts = re.findall(
+                    r"([a-zA-Z0-9_]+|\[\d+\]|\[['\"][^'\"]+['\"]\])", var_expr
+                )
+
+                if path_parts and path_parts[0] in context:
+                    var_val = context[path_parts[0]]
+                    found = True
+                    try:
+                        for part in path_parts[1:]:
+                            if part.startswith("[") and part.endswith("]"):
+                                inner = part[1:-1]
+                                if (inner.startswith("'") and inner.endswith("'")) or (
+                                    inner.startswith('"') and inner.endswith('"')
+                                ):
+                                    key = inner[1:-1]
+                                    var_val = var_val[key]
                                 else:
-                                    var_val = getattr(var_val, part)
-                            found = True
-                        except (KeyError, AttributeError, TypeError):
-                            pass
-                elif var_name in context:
-                    var_val = context[var_name]
+                                    # Integer index
+                                    var_val = var_val[int(inner)]
+                            elif isinstance(var_val, dict):
+                                var_val = var_val[part]
+                            else:
+                                var_val = getattr(var_val, part)
+                    except (KeyError, AttributeError, TypeError, IndexError):
+                        found = False
+                elif var_expr in context:
+                    var_val = context[var_expr]
                     found = True
 
                 if found:
-                    # If the entire string is just the variable, replace with the variable's value directly
-                    # (preserves types like int, list, etc.)
-                    if new_value.strip() == f"{{{{ {var_name} }}}}":
-                        return self._resolve_variable(var_val, context, depth + 1)
-
-                    # Otherwise cast to string for text interpolation
-                    new_value = new_value.replace(f"{{{{ {var_name} }}}}", str(var_val))
-                    # Also handle tighter spacing {{var}}
-                    new_value = new_value.replace(f"{{{{{var_name}}}}}", str(var_val))
+                    # Apply filters sequentially
+                    for filter_expr in filters:
+                        filter_expr = filter_expr.strip()
+                        if filter_expr.startswith("replace"):
+                            replace_match = re.search(
+                                r"replace\(\s*['\"]([^'\"]*)['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*\)",
+                                filter_expr,
+                            )
+                            if replace_match:
+                                old, new = replace_match.groups()
+                                if isinstance(var_val, str):
+                                    var_val = var_val.replace(old, new)
+                        elif filter_expr == "basename":
+                            if isinstance(var_val, str):
+                                var_val = os.path.basename(var_val)
+                        elif filter_expr == "dirname":
+                            if isinstance(var_val, str):
+                                var_val = os.path.dirname(var_val)
+                        elif filter_expr.startswith("map"):
+                            attr_match = re.search(
+                                r"attribute=['\"]([^'\"]+)['\"]", filter_expr
+                            )
+                            if attr_match and isinstance(var_val, list):
+                                attr = attr_match.group(1)
+                                var_val = [
+                                    (
+                                        item.get(attr)
+                                        if isinstance(item, dict)
+                                        else getattr(item, attr, None)
+                                    )
+                                    for item in var_val
+                                ]
+                        elif filter_expr == "list":
+                            if not isinstance(var_val, list):
+                                var_val = list(var_val)
+                    return var_val
                 else:
-                    self.logger.warning(f"Variable '{var_name}' not found in context.")
+                    # Warn only if it's not a known dynamic variable
+                    root = path_parts[0] if path_parts else var_expr
+                    if root not in [
+                        "item",
+                        "items",
+                        "task_results",
+                        "frame",
+                        "first_frame",
+                        "last_frame",
+                        "filename",
+                        "frame_index",
+                    ]:
+                        self.logger.warning(
+                            f"Variable expression '{var_expr}' could not be resolved."
+                        )
+                return None
+
+            if full_match:
+                resolved = resolve_expr(full_match.group("expr"))
+                if resolved is not None:
+                    # If it's a direct match, return the raw type (list, dict, etc.)
+                    if isinstance(resolved, (str, list, dict)):
+                        return self._resolve_variable(resolved, context, depth + 1)
+                    return resolved
+
+            # Otherwise, do string interpolation for all templates found
+            def substitute(m):
+                resolved = resolve_expr(m.group(1))
+                return str(resolved) if resolved is not None else m.group(0)
+
+            # Use a pattern that doesn't capture extra inner whitespace into the expression
+            new_value = re.sub(r"\{\{\s*([^}]+?)\s*\}\}", substitute, value)
 
             if new_value != value:
                 return self._resolve_variable(new_value, context, depth + 1)
@@ -236,6 +350,12 @@ class CrunchizeEngine:
             class_name = "OIIOToolTask"
         elif task_type == "pathmap":
             class_name = "PathMappingTask"
+        elif task_type == "parsepath":
+            class_name = "ParsepathTask"
+        elif task_type == "inscribe":
+            class_name = "InscribeTask"
+        elif task_type == "thumbnail":
+            class_name = "ThumbnailTask"
         else:
             # Snake case to CamelCase
             class_name = "".join(x.capitalize() for x in task_type.split("_")) + "Task"
@@ -255,6 +375,7 @@ class CrunchizeEngine:
 
         tasks_def = self.playbook.get("tasks", [])
         task_was_loop = {}  # Track if a task performed iteration/filtering
+        last_task_name = None
 
         for i, task_def in enumerate(tasks_def):
             name = task_def.get("name", f"Task {i}")
@@ -262,7 +383,6 @@ class CrunchizeEngine:
             task_args = task_def.get("args", {})
             loop_items = task_def.get("loop", None)
             input_ref = task_def.get("input", None)
-            register_var = task_def.get("register")
             batch_mode = task_def.get("batch", False)
 
             if not task_type:
@@ -283,6 +403,11 @@ class CrunchizeEngine:
             # Determine items to process from 'input' or 'loop'
             items_to_process = None
             should_filter = False
+
+            # Implicit linear flow: if no input/loop is specified, automatically
+            # use the result of the previous task as the current task's input.
+            if not input_ref and not loop_items and last_task_name:
+                input_ref = last_task_name
 
             if input_ref:
                 # Try to find input in task results (by name)
@@ -309,13 +434,50 @@ class CrunchizeEngine:
                 and items_to_process
                 and isinstance(items_to_process, list)
             ):
-                # 1. Apply file_amount (relative slice from start)
+                # 1. Apply file_amount (Stride logic per sequence)
+                # Instead of taking the first N frames, we pick frames evenly across
+                # every detected sequence to ensure representative shot coverage.
                 if self.file_amount < 1.0:
                     original_count = len(items_to_process)
-                    limit = max(0, int(original_count * self.file_amount))
-                    items_to_process = items_to_process[:limit]
+                    groups = defaultdict(list)
+                    # Regex to find: base + separator + frame + ext
+                    pattern = re.compile(r"^(.*?)[._](\d+)(\.[a-zA-Z0-9]+)$")
+
+                    # Group items by sequence to apply filtering per-shot
+                    for item in items_to_process:
+                        path = ""
+                        if isinstance(item, str): path = item
+                        elif isinstance(item, dict):
+                            path = item.get("src") or item.get("dst") or item.get("path") or item.get("item") or ""
+
+                        match = pattern.search(os.path.basename(path)) if path else None
+                        if match:
+                            groups[(os.path.dirname(path), match.group(1), match.group(3))].append(item)
+                        else:
+                            groups[("single", path, id(item))].append(item)
+
+                    filtered_items = []
+                    for key in sorted(groups.keys()):
+                        seq_items = groups[key]
+                        seq_count = len(seq_items)
+
+                        # Calculate frame count per sequence, ensuring a 2-frame minimum.
+                        limit = max(min(2, seq_count), int(seq_count * self.file_amount))
+
+                        if limit >= seq_count:
+                            filtered_items.extend(seq_items)
+                        else:
+                            # Stride logic: pick frames evenly spaced across the range.
+                            stride = max(1.0, (seq_count - 1) / (limit - 1))
+                            for j in range(limit):
+                                index = min(int(round(j * stride)), seq_count - 1)
+                                frame_item = seq_items[index]
+                                if frame_item not in filtered_items:
+                                    filtered_items.append(frame_item)
+
+                    items_to_process = filtered_items
                     self.logger.info(
-                        f"Filtering items with file_amount={self.file_amount}: {original_count} -> {len(items_to_process)}"
+                        f"Filtering items with file_amount={self.file_amount} (stride per sequence): {original_count} -> {len(items_to_process)}"
                     )
 
                 # 2. Apply every_nth
@@ -335,18 +497,33 @@ class CrunchizeEngine:
                         f"Running task in batch mode with {len(items_to_process)} items."
                     )
                     context = self.variables.copy()
+                    context.update(
+                        {
+                            "items": items_to_process,
+                            "total": len(items_to_process),
+                            "first_item": items_to_process[0]
+                            if items_to_process
+                            else None,
+                            "last_item": items_to_process[-1]
+                            if items_to_process
+                            else None,
+                        }
+                    )
                     resolved_args = self._resolve_variable(task_args, context)
-                    resolved_args["items"] = items_to_process
+                    if isinstance(resolved_args, dict):
+                        resolved_args["items"] = items_to_process
+                        resolved_args["_variables"] = self.variables
 
                     self.logger.debug(f"Task '{name}' (Batch) Input: {resolved_args}")
 
                     try:
-                        task_output = run_task_wrapper(
+                        res = run_task_wrapper(
                             task_cls, resolved_args, self.dry_run, task_info
                         )
-                        self.logger.debug(
-                            f"Task '{name}' (Batch) Output: {task_output}"
-                        )
+                        self.logger.debug(f"Task '{name}' (Batch) Output: {res}")
+
+                        # Return task result directly (Simplified data model)
+                        task_output = res
                     except Exception as e:
                         self.logger.error(f"Batch task execution failed: {e}")
 
@@ -356,26 +533,40 @@ class CrunchizeEngine:
                     )
 
                     futures = []
-                    # Adjust max_workers as needed, or let it default to CPU count
+                    total = len(items_to_process)
+                    first_item = items_to_process[0] if total > 0 else None
+                    last_item = items_to_process[-1] if total > 0 else None
+
+                    # Parallel Execution: Image-per-frame tasks are distributed across
+                    # multiple processes to maximize throughput on many-core workstations.
                     with concurrent.futures.ProcessPoolExecutor() as executor:
-                        for item in items_to_process:
+                        for idx, item in enumerate(items_to_process):
                             # Create context for this iteration
                             context = self.variables.copy()
-                            context["item"] = item
+                            context.update(
+                                {
+                                    "item": item,
+                                    "index": idx,
+                                    "total": total,
+                                    "first_item": first_item,
+                                    "last_item": last_item,
+                                }
+                            )
 
-                            # If item is a dictionary, unpack it into context
+                            # If item is a dictionary, unpack it into context (preserving 'item' itself)
                             if isinstance(item, dict):
-                                context.update(item)
+                                context.update(
+                                    {k: v for k, v in item.items() if k not in context}
+                                )
 
                             # Resolve arguments with the item context
                             resolved_args = self._resolve_variable(task_args, context)
 
-                            # Inject 'item' into args so tasks can access it directly
-                            if (
-                                isinstance(resolved_args, dict)
-                                and "item" not in resolved_args
-                            ):
-                                resolved_args["item"] = item
+                            # Inject 'item' and context into args so tasks can access them directly
+                            if isinstance(resolved_args, dict):
+                                if "item" not in resolved_args:
+                                    resolved_args["item"] = item
+                                resolved_args["_variables"] = self.variables
 
                             futures.append(
                                 executor.submit(
@@ -388,46 +579,57 @@ class CrunchizeEngine:
                             )
 
                     # Wait for all to complete and collect results
-                    loop_results = []
+                    task_output = []
                     for future in futures:
                         try:
                             res = future.result()
                             self.logger.debug(
                                 f"Task '{name}' (Parallel Item) Output: {res}"
                             )
-                            loop_results.append(res)
+                            task_output.append(res)
                         except Exception as e:
                             self.logger.error(f"Parallel task execution failed: {e}")
-                            loop_results.append(None)
-
-                    task_output = loop_results
+                            task_output.append(None)
 
             else:
                 # Single execution
                 context = self.variables.copy()
                 if items_to_process is not None:
-                    context["item"] = items_to_process
-                    # If item is a dictionary, unpack it into context
+                    context.update(
+                        {
+                            "item": items_to_process,
+                            "index": 0,
+                            "total": 1,
+                            "first_item": items_to_process,
+                            "last_item": items_to_process,
+                        }
+                    )
+                    # If item is a dictionary, unpack it into context (preserving 'item' itself)
                     if isinstance(items_to_process, dict):
-                        context.update(items_to_process)
+                        context.update(
+                            {
+                                k: v
+                                for k, v in items_to_process.items()
+                                if k not in context
+                            }
+                        )
 
                 resolved_args = self._resolve_variable(task_args, context)
 
-                # Inject 'item' into args if we have one
-                if (
-                    items_to_process is not None
-                    and isinstance(resolved_args, dict)
-                    and "item" not in resolved_args
-                ):
-                    resolved_args["item"] = items_to_process
+                # Inject 'item' and context into args if we have one
+                if isinstance(resolved_args, dict):
+                    if items_to_process is not None and "item" not in resolved_args:
+                        resolved_args["item"] = items_to_process
+                    resolved_args["_variables"] = self.variables
 
                 self.logger.debug(f"Task '{name}' Input: {resolved_args}")
 
                 try:
-                    task_output = run_task_wrapper(
+                    res = run_task_wrapper(
                         task_cls, resolved_args, self.dry_run, task_info
                     )
-                    self.logger.debug(f"Task '{name}' Output: {task_output}")
+                    self.logger.debug(f"Task '{name}' Output: {res}")
+                    task_output = res
                 except Exception as e:
                     self.logger.error(f"Task execution failed: {e}")
 
@@ -437,9 +639,10 @@ class CrunchizeEngine:
                 items_to_process, list
             )
 
-            if register_var:
-                self.variables[register_var] = task_output
-                self.logger.debug(f"Registered result to variable '{register_var}'")
+            # Auto-register result to variables using the task name.
+            # This enables referencing any previous task's output as a variable.
+            self.variables[name] = task_output
+            last_task_name = name
 
             setattr(logging, "_crunchize_task_context", "")
 

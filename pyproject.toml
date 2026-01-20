@@ -25,6 +25,7 @@ dependencies = [
   "PyYAML",
   "opencolorio",
   "click",
+  "Pillow",
 ]
 
 [project.scripts]

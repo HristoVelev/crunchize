@@ -1,116 +1,115 @@
 # Crunchize
 
-**Crunchize** is an Ansible-inspired batch image processing framework designed for VFX and Animation pipelines. It allows you to define complex image manipulation workflows using simple YAML playbooks, supporting variable substitution, task loops, and parallel execution.
+**Crunchize** is a high-performance, Ansible-inspired batch image processing framework built specifically for VFX and Animation pipelines. It allows you to define complex image manipulation workflows using simple YAML playbooks, featuring a simplified data model, implicit task flow, and parallel execution by default.
 
-## Features
+## Core Concepts
 
-*   **Playbook-Driven**: Define workflows in declarative YAML files.
-*   **Variable Substitution**: Use Jinja2-style `{{ variables }}` for dynamic path and argument resolution.
-*   **Parallel Execution**: Automatically distributes tasks across available CPU cores when looping over frame lists.
-*   **Modular Architecture**: Easily extensible task system (currently supports OpenColorIO conversions).
-*   **Dry Run**: Simulate execution to validate paths and logic before processing.
+*   **Simplified Data Model**: Tasks pass light objects (usually a single path string or a `{src, dst}` pair) down the pipeline.
+*   **Implicit Flow**: Tasks automatically receive the output of the preceding task as their input unless explicitly overridden.
+*   **Task Name as Variable**: Every task's result is automatically available as a variable named after the task, making branching effortless.
+*   **Parallel Execution**: Image-per-frame tasks are automatically distributed across CPU cores.
+*   **Sequence Aware**: Built-in logic for handling VFX frame sequences, including smart stride filtering (`file_amount`) that preserves shot coverage.
 
 ## Installation
 
-Crunchize requires Python 3.8 or higher.
+Crunchize requires Python 3.8 or higher and common VFX tools (`ocioconvert`, `oiiotool`, `ffmpeg`).
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/crunchize.git
+git clone https://github.com/crunchize/crunchize.git
 cd crunchize
 
 # Install with pip
 pip install .
 ```
 
-For development:
-```bash
-pip install -e .
-```
+## Quick Start
 
-## Usage
-
-The primary entry point is the `crunchize` CLI.
+Run a playbook with variable substitution:
 
 ```bash
-crunchize run path/to/playbook.yml
+crunchize run playbooks/examples/01_basic_conversion.yml \
+  -e "input_pattern=/path/to/plates/*.exr" \
+  --dry-run
 ```
-
-### Options
-
-*   `-v, --verbose`: Enable debug logging.
-*   `--dry-run`: Simulate execution without creating files or running commands.
 
 ## Playbook Structure
 
-A playbook consists of **variables** and a list of **tasks**.
-
-### Example: `convert_shot.yml`
+A playbook consists of global `config`, shared `vars`, and a sequence of `tasks`.
 
 ```yaml
+config:
+  file_amount: 1.0  # Process all files (use 0.1 for a quick 10% QC run)
+
 vars:
-  shot: "TS_001"
-  # Define a range of frames or a specific list
-  frames: ["1001", "1002", "1003", "1004"]
-  
-  # Paths
-  root_dir: "/mnt/projects/my_movie"
-  ocio_config: "{{ root_dir }}/config.ocio"
-  
-  # Colorspaces
-  src_space: "ACES - ACEScg"
-  dst_space: "Output - sRGB"
+  ocio_config: "/path/to/config.ocio"
 
 tasks:
-  - name: "Convert EXR to sRGB Proxy"
-    type: "ocio"
-    loop: "{{ frames }}"
+  - name: "source_files"
+    type: "filein"
     args:
-      # {{ item }} is the current value from the loop list
-      input_path: "{{ root_dir }}/shots/{{ shot }}/exr/{{ shot }}_{{ item }}.exr"
-      output_path: "{{ root_dir }}/shots/{{ shot }}/proxy/{{ shot }}_{{ item }}.jpg"
+      pattern: "{{ input_pattern }}"
+
+  - name: "proxy_mapping"
+    type: "pathmap"
+    # Implicitly takes 'source_files'
+    args:
+      search: "PLATES"
+      replace: "PROXIES"
+
+  - name: "convert_to_jpg"
+    type: "convert"
+    # Implicitly takes 'src' and 'dst' from 'proxy_mapping'
+    args:
+      output_format: "jpg"
       config_path: "{{ ocio_config }}"
-      input_space: "{{ src_space }}"
-      output_space: "{{ dst_space }}"
+      input_space: "ACEScg"
+      output_space: "sRGB"
 ```
 
-## Available Tasks
+## CLI Options
 
-### OCIO Convert (`type: ocio`)
+*   `run <playbook>`: Execute the specified playbook.
+*   `-v, --verbose`: Enable debug logging and internal task state.
+*   `--dry-run`: Simulate execution without creating files or running commands.
+*   `--file-amount <float>`: Override playbook config to process a subset of frames (0.0 - 1.0). Uses stride logic to ensure coverage of all shots.
+*   `--every-nth <int>`: Process every Nth frame in a sequence.
+*   `-e "key=value"`: Inject or override variables at runtime.
 
-Wraps the OpenColorIO `ocioconvert` tool to transform image color spaces.
+## Core Tasks
 
-**Arguments:**
-
-*   `input_path`: Path to the source image.
-*   `output_path`: Path to the destination image.
-*   `config_path`: Path to the `.ocio` configuration file.
-*   `input_space`: Name of the input color space.
-*   `output_space`: Name of the output color space.
+| Type | Description |
+| :--- | :--- |
+| `filein` | Gathers files using glob patterns. |
+| `pathmap` | Manipulates paths for rerooting or sequence reduction. |
+| `convert` | OCIO color space conversion using `ocioconvert`. |
+| `oiio` | Image resizing and manipulation using `oiiotool`. |
+| `inscribe` | Powerful layout engine for Slates and Burn-ins (text/images/metadata). |
+| `ffmpeg` | Video encoding from image sequences. |
+| `thumbnail` | Generate mid-sequence poster frames. |
+| `parsepath` | Extract metadata (Seq, Shot, Ver) from paths using regex. |
 
 ## Development
 
 ### Adding a New Task
 
-1.  Create a new file in `src/crunchize/tasks/` (e.g., `ffmpeg.py`).
-2.  Inherit from `BaseTask`.
-3.  Implement `validate_args` and `run`.
+Create a new file in `src/crunchize/tasks/` (e.g., `resize.py`):
 
 ```python
 from crunchize.tasks.base import BaseTask
 
-class FFmpegTask(BaseTask):
+class ResizeTask(BaseTask):
     def validate_args(self):
-        if "input" not in self.args:
-            raise ValueError("Missing input")
+        # Validation logic
+        pass
 
     def run(self):
-        # Implementation here
-        pass
+        # Implicitly resolve paths from previous task
+        input_path = self._resolve_path_from_item(self.args.get("item"), prioritize_file=True)
+        # Your logic here...
+        return output_path
 ```
-
-The engine will automatically discover the task if the type name matches the module name (or you can register it explicitly in the engine logic).
 
 ## License
 
-This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache 2.0 License.

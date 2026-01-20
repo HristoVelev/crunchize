@@ -1,0 +1,48 @@
+---
+config:
+  file_amount: 1.0
+  wipe_log: true
+  dump_path: "~/crunchize/plates_thumbs_dump.yml"
+
+vars:
+  # Input Configuration
+  source_root: "/mnt/prod/projects/dra/global/input/2026-01-07--001/PLATES"
+  input_pattern: "{{ source_root }}/*/*.exr"
+
+tasks:
+  # 1. Gather all plate files recursively
+  - name: "Find Source Plates"
+    type: "filein"
+    register: "source"
+    args:
+      pattern: "{{ input_pattern }}"
+      recursive: true
+
+  # 2. Map sequences and define thumbnail destinations
+  # We reroot from PLATES to plates_thumbs
+  - name: "Thumbnail paths"
+    type: "pathmap"
+    batch: true
+    input: "Find Source Plates"
+    register: "thumb_seq"
+    args:
+      input_key: "source"
+      reduce: true
+      search: "PLATES"
+      replace: "plates_thumbs"
+
+  # 3. Generate Thumbnails
+  # Picks the middle frame (0.5) and resizes to 480px width
+  - name: "Generate Thumbnails"
+    type: "thumbnail"
+    input: "Thumbnail paths"
+    register: "thumb_file"
+    args:
+      # Extract original source paths from the sequence objects
+      input_files: "{{ files | map(attribute='source') | list }}"
+      # 'base_path' holds the mapped base path from PathMappingTask
+      output_path: "{{ base_path }}"
+      sourcelocation: 0.5
+      size: 480
+      format: "jpg"
+      existing: "skip"

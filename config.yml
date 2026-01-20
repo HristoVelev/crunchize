@@ -1,6 +1,6 @@
 ---
-log_path: "/home/admin/crunchize/crunchize.log"
-dump_path: "/home/admin/crunchize/crunchize_dump.yml"
+log_path: "~/crunchize/crunchize.log"
+dump_path: "~/crunchize/crunchize_dump.yml"
 every_nth: 1
 wipe_log: true
 file_amount: 1.0
