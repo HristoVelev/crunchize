@@ -1,9 +1,45 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.db
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
 .DS_Store
-# Don't track the actual media or large configs
+*.swp
+*~
+
+# Crunchize Specific
+# Local logs and state dumps
+*.log
+crunchize_dump.yml
+crunchize.log
+
+# Media & Project Data
+# We ignore high-volume binary data and local project mounts
 projects/
 *.exr
 *.jpg
+*.jpeg
+*.png
 *.mp4
+*.mov
+*.mkv
+*.tif
+*.tiff
+
+# Configuration & Temp
 todolist.yml
+.ipynb_checkpoints
