@@ -1,0 +1,32 @@
+# 05_ocio_display.yml
+# Applying ACES color transforms for display (Display Render)
+# Usage: crunchize run 05_ocio_display.yml -e input_pattern="/path/to/*.exr"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+  ocio_config: "/mnt/prod/bin/aces/studio-config-v4.0.0_aces-v2.0_ocio-v2.5.ocio"
+
+  # Standard ACES Pipeline Spaces
+  input_space: "ACES2065-1"
+  output_space: "Rec.1886 Rec.709 - Display"
+
+tasks:
+  - name: "source_files"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  - name: "display_mapping"
+    type: "pathmap"
+    args:
+      search: "/PLATES/"
+      replace: "/DISPLAY_REVIEW/"
+
+  - name: "ocio_render"
+    type: "convert"
+    # Implicitly takes 'src' and 'dst' from 'display_mapping'
+    args:
+      output_format: "jpg"
+      config_path: "{{ ocio_config }}"
+      input_space: "{{ input_space }}"
+      output_space: "{{ output_space }}"

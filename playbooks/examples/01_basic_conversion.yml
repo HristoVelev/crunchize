@@ -1,0 +1,27 @@
+# 01_basic_conversion.yml
+# Simple EXR to JPG conversion using OCIO
+# Usage: crunchize run 01_basic_conversion.yml -e input_pattern="/path/to/*.exr"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+  ocio_config: "/path/to/config.ocio"
+
+tasks:
+  - name: "source_files"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  - name: "proxy_mapping"
+    type: "pathmap"
+    args:
+      search: "PLATES"
+      replace: "PROXIES"
+
+  - name: "convert_to_jpg"
+    type: "convert"
+    args:
+      output_format: "jpg"
+      config_path: "{{ ocio_config }}"
+      input_space: "ACEScg"
+      output_space: "sRGB"

@@ -1,0 +1,25 @@
+# 02_proxy_generation.yml
+# Scaling image sequences (50%) for high-speed review
+# Usage: crunchize run 02_proxy_generation.yml -e input_pattern="/path/to/*.jpg"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+
+tasks:
+  - name: "source_files"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  - name: "scale_mapping"
+    type: "pathmap"
+    # Implicitly takes 'source_files'
+    args:
+      search: "/highres/"
+      replace: "/proxy_50/"
+
+  - name: "scaled_files"
+    type: "oiio"
+    # Implicitly takes 'src' and 'dst' from 'scale_mapping'
+    args:
+      scale: 0.5

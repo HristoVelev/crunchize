@@ -1,0 +1,30 @@
+# 03_review_video.yml
+# Building a review MP4 from an image sequence
+# Usage: crunchize run 03_review_video.yml -e input_pattern="/path/to/*.jpg"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+
+tasks:
+  - name: "source_files"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  - name: "movie_sequence"
+    type: "pathmap"
+    batch: true
+    # Groups frames into a sequence object for encoding
+    args:
+      search: "/images/"
+      replace: "/videos/"
+      reduce: true
+
+  - name: "video_file"
+    type: "ffmpeg"
+    # Implicitly takes 'files' and 'base_path' from 'movie_sequence'
+    args:
+      fps: 24
+      container: "mp4"
+      codec: "libx264"
+      extra_args: ["-crf", "23", "-preset", "fast"]

@@ -1,0 +1,44 @@
+# 08_qc_check.yml
+# Fast quality check workflow - processes every 10th frame of a sequence
+# Usage: crunchize run 08_qc_check.yml -e input_pattern="/path/to/*.exr" --every-nth 10
+
+vars:
+  input_pattern: "" # Substitute via CLI
+
+tasks:
+  # 1. Discover all source files
+  - name: "source_files"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  # 2. Map to a QC directory (Every Nth frame logic is handled by the engine)
+  - name: "qc_mapping"
+    type: "pathmap"
+    args:
+      search: "/PLATES/"
+      replace: "/QC_STRIDE/"
+
+  # 3. Create lightweight JPG proxies for the subset of frames
+  - name: "qc_proxies"
+    type: "oiio"
+    args:
+      scale: 0.25  # Very small for fast browsing
+
+  # 4. Burn-in frame number and 'QC' label
+  - name: "qc_burnin"
+    type: "inscribe"
+    args:
+      type: "burnin"
+      groups:
+        - anchor: "top-right"
+          items:
+            - type: "text"
+              source: "QC STRIDE"
+              color: "yellow"
+              size: 0.05
+        - anchor: "bottom-left"
+          items:
+            - type: "text"
+              source: "FRAME: {{ frame }}"
+              size: 0.03

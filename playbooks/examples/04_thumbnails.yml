@@ -1,0 +1,29 @@
+# 04_thumbnails.yml
+# Generating mid-sequence poster frames (thumbnails)
+# Usage: crunchize run 04_thumbnails.yml -e input_pattern="/path/to/*.jpg"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+
+tasks:
+  - name: "source_files"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  - name: "thumb_mapping"
+    type: "pathmap"
+    batch: true
+    # Groups the whole sequence to pick one frame from it
+    args:
+      search: "/plates/"
+      replace: "/thumbs/"
+      reduce: true
+
+  - name: "thumb_file"
+    type: "thumbnail"
+    # Implicitly takes the grouped sequence from 'thumb_mapping'
+    args:
+      sourcelocation: 0.5  # Pick middle frame
+      size: 480            # Width in pixels
+      format: "jpg"

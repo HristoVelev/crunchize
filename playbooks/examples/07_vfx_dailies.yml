@@ -1,0 +1,89 @@
+# 07_vfx_dailies.yml
+# Full pipeline example: Metadata Extraction -> Proxies -> Burn-ins -> Slate -> Review Video
+# Usage: crunchize run 07_vfx_dailies.yml -e input_pattern="/path/to/PLATES/SEQ_SHOT/*.exr"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+  ocio_config: "/mnt/prod/bin/aces/studio-config-v4.0.0_aces-v2.0_ocio-v2.5.ocio"
+
+tasks:
+  # 1. Gather files
+  - name: "source_files"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  # 2. Extract metadata from the first frame
+  - name: "meta"
+    type: "parsepath"
+    batch: true
+    args:
+      input_path: "{{ source_files[0] }}"
+      pattern: ".*/(?P<seq>[^/]+)/(?P<shot>[^/]+)/.*"
+
+  # 3. Create mapping for burn-in JPGs
+  - name: "burnin_mapping"
+    type: "pathmap"
+    input: "source_files"
+    args:
+      search: "/PLATES/"
+      replace: "/DAILIES_BURNIN/"
+
+  # 4. Generate proxies with metadata burn-ins
+  - name: "burnin_files"
+    type: "inscribe"
+    args:
+      type: "burnin"
+      groups:
+        - anchor: "top-left"
+          items:
+            - type: "text"
+              source: "SEQ: {{ meta.seq }} | SHOT: {{ meta.shot }}"
+              size: 0.02
+        - anchor: "bottom-right"
+          items:
+            - type: "text"
+              source: "{{ frame }}"
+              size: 0.03
+
+  # 5. Create mapping for the slate frame
+  - name: "slate_mapping"
+    type: "pathmap"
+    input: "burnin_files"
+    args:
+      search: "/DAILIES_BURNIN/"
+      replace: "/DAILIES_SLATE/"
+
+  # 6. Prepend a Slate (Frame 0000) to the sequence
+  - name: "sequence_with_slate"
+    type: "inscribe"
+    batch: true
+    args:
+      type: "slate"
+      groups:
+        - anchor: "mid-mid"
+          layout: "vertical"
+          items:
+            - type: "text"
+              source: "SHOT: {{ meta.seq }}_{{ meta.shot }}"
+              size: 0.08
+            - type: "text"
+              source: "STATUS: FOR REVIEW"
+              size: 0.04
+
+  # 7. Group the expanded sequence for video encoding
+  - name: "movie_sequence"
+    type: "pathmap"
+    batch: true
+    args:
+      search: "/DAILIES_/"
+      replace: "/DAILIES_VIDEO/"
+      reduce: true
+
+  # 8. Render the Review MP4
+  - name: "video_file"
+    type: "ffmpeg"
+    args:
+      fps: 24
+      container: "mp4"
+      extra_args: ["-crf", "23", "-preset", "fast"]

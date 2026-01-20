@@ -1,0 +1,48 @@
+# 10_multi_shot_batch.yml
+# Processing multiple shots in parallel (e.g. creating quicktimes for a whole sequence)
+# Usage: crunchize run 10_multi_shot_batch.yml -e input_pattern="/mnt/projects/my_show/SHOTS/sq010/*/PLATES/*.exr"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+
+tasks:
+  # 1. Discover all frames across all shots in the sequence
+  - name: "all_shot_frames"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  # 2. Map to a common review directory, keeping shot hierarchy
+  - name: "review_mapping"
+    type: "pathmap"
+    args:
+      regex: true
+      # Capture Sequence and Shot ID to maintain structure
+      search: ".*/SHOTS/(?P<seq>[^/]+)/(?P<shot>[^/]+)/PLATES/.*"
+      replace: "/mnt/reviews/sq010_dailies/\\g<shot>/frames/"
+
+  # 3. Create proxy JPGs for all shots concurrently
+  - name: "proxy_frames"
+    type: "oiio"
+    args:
+      scale: 0.5
+      format: "jpg"
+
+  # 4. Group frames by shot for video encoding
+  # The 'reduce' logic automatically separates frames into distinct shot lists
+  - name: "shot_sequences"
+    type: "pathmap"
+    batch: true
+    args:
+      search: "/frames/"
+      replace: "/video/"
+      reduce: true
+
+  # 5. Encode a review video for each shot
+  - name: "shot_videos"
+    type: "ffmpeg"
+    args:
+      fps: 24
+      container: "mov"
+      codec: "prores_ks"
+      extra_args: ["-profile:v", "0"] # ProRes 422 Proxy

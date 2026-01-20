@@ -1,0 +1,69 @@
+# 12_handoff_package.yml
+# Creating a delivery package (Video + Thumbs + Proxies) from source plates
+# Usage: crunchize run 12_handoff_package.yml -e input_pattern="/path/to/PLATES/*.exr"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+
+tasks:
+  # 1. Discover source files
+  - name: "source_files"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  # --- Branch A: Quicktime Video ---
+  # Groups the frames into a sequence for encoding
+  - name: "video_sequence"
+    type: "pathmap"
+    batch: true
+    input: "source_files"
+    args:
+      search: "/PLATES/"
+      replace: "/DELIVERY/video/"
+      reduce: true
+
+  - name: "render_video"
+    type: "ffmpeg"
+    # Implicitly takes the sequence object from 'video_sequence'
+    args:
+      fps: 24
+      container: "mov"
+      codec: "prores_ks"
+      extra_args: ["-profile:v", "0"] # Proxy
+
+  # --- Branch B: Thumbnail ---
+  # Groups sequence to pick a single representative frame
+  - name: "thumb_mapping"
+    type: "pathmap"
+    batch: true
+    input: "source_files"
+    args:
+      search: "/PLATES/"
+      replace: "/DELIVERY/thumbs/"
+      reduce: true
+
+  - name: "render_thumb"
+    type: "thumbnail"
+    args:
+      sourcelocation: 0.5
+      size: 480
+      format: "jpg"
+
+  # --- Branch C: JPG Proxies ---
+  # Maps every frame individually to a new location and extension
+  - name: "proxy_mapping"
+    type: "pathmap"
+    input: "source_files"
+    args:
+      regex: true
+      # Change directory AND extension (e.g. .exr -> .jpg)
+      search: "/PLATES/(.*)\\.exr"
+      replace: "/DELIVERY/proxies/\\1.jpg"
+
+  - name: "render_proxies"
+    type: "oiio"
+    # Implicitly takes 'src' and 'dst' from 'proxy_mapping'
+    args:
+      scale: 1.0
+      # OIIO automatically writes JPG based on the output extension defined above

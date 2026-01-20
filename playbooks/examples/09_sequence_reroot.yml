@@ -1,0 +1,33 @@
+# 09_sequence_reroot.yml
+# Relocating and renaming shots within a project structure
+# Usage: crunchize run 09_sequence_reroot.yml -e input_pattern="/path/to/old_project/SHOTS/*/*.exr"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+  new_project_root: "/mnt/projects/new_project/SHOTS"
+
+tasks:
+  # 1. Discover sequences in the old location
+  - name: "old_plates"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  # 2. Reroot the sequences to the new project structure
+  # This example moves from .../old_project/SHOTS/seq/shot/... to .../new_project/SHOTS/seq/shot/...
+  - name: "new_plates_mapping"
+    type: "pathmap"
+    args:
+      regex: true
+      search: ".*/old_project/SHOTS/(?P<seq>[^/]+)/(?P<shot>[^/]+)/(?P<file>.*)"
+      replace: "{{ new_project_root }}/\\g<seq>/\\g<shot>/PLATES/\\g<file>"
+
+  # 3. Perform the migration using OIIO (copy/transcode)
+  # This ensures the new files are valid images and can optionally change bit-depth or metadata.
+  - name: "migrated_plates"
+    type: "oiio"
+    args:
+      # Copy at 100% scale
+      scale: 1.0
+      # Optional: force a specific format during migration
+      # output_format: "exr"

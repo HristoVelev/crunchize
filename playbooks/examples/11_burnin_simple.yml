@@ -1,0 +1,40 @@
+# 11_burnin_simple.yml
+# Applies basic metadata overlays (Frame number, Label) to images
+# Usage: crunchize run 11_burnin_simple.yml -e input_pattern="/path/to/*.jpg"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+
+tasks:
+  - name: "source_files"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  - name: "burnin_mapping"
+    type: "pathmap"
+    args:
+      search: "/PLATES/"
+      replace: "/BURNINS/"
+
+  - name: "burnin_render"
+    type: "inscribe"
+    args:
+      type: "burnin"
+      groups:
+        - anchor: "top-left"
+          items:
+            - type: "text"
+              source: "REVIEW COPY"
+              color: "red"
+              size: 0.03
+        - anchor: "bottom-left"
+          items:
+            - type: "text"
+              source: "{{ filename }}"
+              size: 0.02
+        - anchor: "bottom-right"
+          items:
+            - type: "text"
+              source: "{{ frame }}"
+              size: 0.04

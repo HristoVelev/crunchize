@@ -1,0 +1,50 @@
+# 06_slates_only.yml
+# Generating VFX slates (Frame 0000) for sequences without processing frames
+# Usage: crunchize run 06_slates_only.yml -e input_pattern="/path/to/*.exr"
+
+vars:
+  input_pattern: "" # Substitute via CLI
+
+tasks:
+  - name: "source_files"
+    type: "filein"
+    args:
+      pattern: "{{ input_pattern }}"
+
+  - name: "meta"
+    type: "parsepath"
+    batch: true
+    args:
+      input_path: "{{ source_files[0] }}"
+      pattern: ".*/(?P<seq>[^/]+)/(?P<shot>[^/]+)/.*"
+
+  - name: "slate_mapping"
+    type: "pathmap"
+    batch: true
+    args:
+      search: "/PLATES/"
+      replace: "/SLATES/"
+      reduce: true
+
+  - name: "slate_generation"
+    type: "inscribe"
+    batch: true
+    # Only generates the slate frame, does not process the sequence
+    args:
+      type: "slate"
+      width: 1920
+      height: 1080
+      groups:
+        - anchor: "mid-mid"
+          layout: "vertical"
+          items:
+            - type: "text"
+              source: "SHOT: {{ meta.seq }}_{{ meta.shot }}"
+              size: 0.08
+            - type: "text"
+              source: "VERSION: v001"
+              size: 0.04
+            - type: "text"
+              source: "STATUS: FINAL"
+              size: 0.03
+              color: "green"
