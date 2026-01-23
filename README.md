@@ -1,6 +1,6 @@
 # Crunchize
 
-**Crunchize** is a high-performance, Ansible-inspired batch image processing framework built specifically for VFX and Animation pipelines. It allows you to define complex image manipulation workflows using simple YAML playbooks, featuring a simplified data model, implicit task flow, and parallel execution by default.
+**Crunchize** is a high-performance, Ansible-inspired batch image processing framework. It allows you to process deep image folder trees, define complex image manipulation workflows using simple YAML playbooks that contain tasks and parallel execution by default. Task library is modularized for easy expansion. Dry running and file count reduction for easier testing.
 
 ## Core Concepts
 
@@ -8,7 +8,7 @@
 *   **Implicit Flow**: Tasks automatically receive the output of the preceding task as their input unless explicitly overridden.
 *   **Task Name as Variable**: Every task's result is automatically available as a variable named after the task, making branching effortless.
 *   **Parallel Execution**: Image-per-frame tasks are automatically distributed across CPU cores.
-*   **Sequence Aware**: Built-in logic for handling VFX frame sequences, including smart stride filtering (`file_amount`) that preserves shot coverage.
+*   **Sequence Aware**: Built-in logic for handling frame sequences, including smart stride filtering (`file_amount`) that preserves shot coverage.
 
 ## Installation
 
